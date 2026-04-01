@@ -1,0 +1,110 @@
+version: '3'
+
+vars:
+  BINARY: mcp-trace
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  LDFLAGS: -ldflags "-X main.Version={{.VERSION}}"
+  DIST_DIR: dist
+  BIN_DIR: bin
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build binary to bin/mcp-trace
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build {{.LDFLAGS}} -o {{.BIN_DIR}}/{{.BINARY}} ./cmd/mcp-trace
+    sources:
+      - '**/*.go'
+      - go.mod
+    generates:
+      - '{{.BIN_DIR}}/{{.BINARY}}'
+
+  run:
+    desc: Build and run with example flags (requires --target)
+    deps: [build]
+    cmds:
+      - ./{{.BIN_DIR}}/{{.BINARY}} {{.CLI_ARGS}}
+
+  test:
+    desc: Run all unit tests
+    cmds:
+      - go test -race -count=1 ./...
+
+  test:cover:
+    desc: Run tests with coverage report
+    cmds:
+      - go test -race -count=1 -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - go tool cover -func=coverage.out | tail -1
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: Format code
+    cmds:
+      - gofmt -w .
+
+  tidy:
+    desc: Tidy go.mod and go.sum
+    cmds:
+      - go mod tidy
+
+  check:
+    desc: Run vet + test (fast sanity check, no lint)
+    deps: [vet, test]
+
+  ci:
+    desc: Full CI pipeline (vet, test, lint, build)
+    deps: [vet, test, lint, build]
+
+  release:
+    desc: Cross-compile binaries for all supported platforms
+    cmds:
+      - mkdir -p {{.DIST_DIR}}
+      - GOOS=linux   GOARCH=amd64  go build {{.LDFLAGS}} -o {{.DIST_DIR}}/{{.BINARY}}_linux_amd64   ./cmd/mcp-trace
+      - GOOS=linux   GOARCH=arm64  go build {{.LDFLAGS}} -o {{.DIST_DIR}}/{{.BINARY}}_linux_arm64   ./cmd/mcp-trace
+      - GOOS=darwin  GOARCH=amd64  go build {{.LDFLAGS}} -o {{.DIST_DIR}}/{{.BINARY}}_darwin_amd64  ./cmd/mcp-trace
+      - GOOS=darwin  GOARCH=arm64  go build {{.LDFLAGS}} -o {{.DIST_DIR}}/{{.BINARY}}_darwin_arm64  ./cmd/mcp-trace
+      - GOOS=windows GOARCH=amd64  go build {{.LDFLAGS}} -o {{.DIST_DIR}}/{{.BINARY}}_windows_amd64.exe ./cmd/mcp-trace
+      - echo "Built {{.DIST_DIR}}:"
+      - ls -lh {{.DIST_DIR}}/
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf {{.BIN_DIR}}/ {{.DIST_DIR}}/ coverage.out coverage.html
+
+  install:
+    desc: Install binary to $GOPATH/bin
+    cmds:
+      - go install {{.LDFLAGS}} ./cmd/mcp-trace
+
+  docker:build:
+    desc: Build Docker image
+    cmds:
+      - docker build -t mcp-trace:{{.VERSION}} .
+
+  docker:run:
+    desc: Run Docker image (pass flags via CLI_ARGS)
+    cmds:
+      - docker run --rm mcp-trace:{{.VERSION}} {{.CLI_ARGS}}
+
+  deps:
+    desc: Download and verify dependencies
+    cmds:
+      - go mod download
+      - go mod verify

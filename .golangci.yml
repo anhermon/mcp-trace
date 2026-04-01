@@ -1,0 +1,33 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+
+linters-settings:
+  gosec:
+    excludes:
+      - G107  # URL provided to HTTP request as taint input — expected for a proxy
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck

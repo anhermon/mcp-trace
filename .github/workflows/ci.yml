@@ -2,13 +2,17 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    name: Test
+  # ── Sanity: vet + build ──────────────────────────────────────────────────────
+  build:
+    name: Build & vet
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,16 +23,87 @@ jobs:
           go-version: '1.22'
           cache: true
 
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Vet
+        run: task vet
+
       - name: Build
-        run: make build
+        run: task build
 
-      - name: Test
-        run: make test
+  # ── Tests with race detector ────────────────────────────────────────────────
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ['1.22', '1.23']
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test with coverage
+        run: task test:cover
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        if: matrix.go == '1.22'
+        with:
+          name: coverage-report
+          path: coverage.html
+
+  # ── Lint ─────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  # ── Branch sanity guard ───────────────────────────────────────────────────────
+  # Prevents direct merges from feature branches to main (must go through dev).
+  branch-policy:
+    name: Branch policy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    steps:
+      - name: Require dev as merge source
+        run: |
+          if [ "${{ github.head_ref }}" != "dev" ]; then
+            echo "::error::PRs to main must come from the 'dev' branch. Got: ${{ github.head_ref }}"
+            exit 1
+          fi
+
+  # ── Cross-compile release ────────────────────────────────────────────────────
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [build, test, lint]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -43,10 +118,17 @@ jobs:
           go-version: '1.22'
           cache: true
 
-      - name: Cross-compile
-        run: make release
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload release assets
+      - name: Cross-compile
+        run: task release
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true
