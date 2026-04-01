@@ -109,9 +109,9 @@ Span names follow the pattern:
 ## Development
 
 ```bash
-make build    # build binary to bin/mcp-trace
-make test     # run all tests
-make release  # cross-compile all platforms to dist/
+task build    # build binary to bin/mcp-trace
+task test     # run all tests
+task release  # cross-compile all platforms to dist/
 ```
 
 ## Roadmap

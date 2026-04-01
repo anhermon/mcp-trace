@@ -10,9 +10,34 @@ permissions:
   contents: read
 
 jobs:
+  # ── go mod tidy check ────────────────────────────────────────────────────────
+  tidy:
+    name: go mod tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify go.sum is up to date
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || {
+            echo "::error::go.mod/go.sum is out of date. Run 'go mod tidy' and commit the result."
+            exit 1
+          }
+
   # ── Sanity: vet + build ──────────────────────────────────────────────────────
   build:
     name: Build & vet
+    needs: [tidy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +63,7 @@ jobs:
   # ── Tests with race detector ────────────────────────────────────────────────
   test:
     name: Test (Go ${{ matrix.go }})
+    needs: [tidy]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -70,6 +96,7 @@ jobs:
   # ── Lint ─────────────────────────────────────────────────────────────────────
   lint:
     name: Lint
+    needs: [tidy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +112,7 @@ jobs:
         with:
           version: latest
 
-  # ── Branch sanity guard ───────────────────────────────────────────────────────
+  # ── Branch sanity guard ──────────────────────────────────────────────────────
   # Prevents direct merges from feature branches to main (must go through dev).
   branch-policy:
     name: Branch policy
