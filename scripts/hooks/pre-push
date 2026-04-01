@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# pre-push hook — lightweight check before push (vet + test, skips slower lint).
+# Catches the most common failures before they reach CI.
+# Install with: task hooks:install
+
+set -euo pipefail
+
+if ! command -v task &>/dev/null; then
+  echo "pre-push: 'task' not found — skipping checks"
+  exit 0
+fi
+
+echo "pre-push: running task check (vet + test) …"
+
+if ! task check; then
+  echo ""
+  echo "pre-push: ✗ task check failed — push blocked."
+  echo "  Fix the issues above, then re-push."
+  echo "  (emergency bypass: git push --no-verify)"
+  exit 1
+fi
+
+echo "pre-push: ✓ checks passed"
