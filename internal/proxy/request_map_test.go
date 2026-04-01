@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -9,7 +10,7 @@ import (
 )
 
 func noopSpan() *InFlightRequest {
-	_, span := noop.NewTracerProvider().Tracer("test").Start(nil, "test") //nolint:staticcheck
+	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
 	return &InFlightRequest{Span: span, StartTime: time.Now()}
 }
 
