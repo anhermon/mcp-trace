@@ -37,20 +37,31 @@ func StartSpan(ctx context.Context, tracer trace.Tracer, attrs SpanAttrs) (conte
 }
 
 // EndSpan finalises a span with duration and status.
-func EndSpan(span trace.Span, durationMS float64, isErr bool, errMsg string) {
-	span.SetAttributes(
-		attribute.Float64("mcp.tool.duration_ms", durationMS),
-	)
+// toolName must be non-empty only for tools/call spans; it gates the mcp.tool.* attributes.
+func EndSpan(span trace.Span, durationMS float64, isErr bool, errMsg string, toolName string) {
+	// Generic attributes always present.
+	span.SetAttributes(attribute.Float64("mcp.duration_ms", durationMS))
+
+	// Tool-scoped attributes only for tools/call.
+	if toolName != "" {
+		span.SetAttributes(attribute.Float64("mcp.tool.duration_ms", durationMS))
+	}
 
 	if isErr {
 		span.SetAttributes(
-			attribute.String("mcp.tool.status", "error"),
+			attribute.String("mcp.status", "error"),
 			attribute.Bool("error", true),
 			attribute.String("error.message", errMsg),
 		)
+		if toolName != "" {
+			span.SetAttributes(attribute.String("mcp.tool.status", "error"))
+		}
 		span.SetStatus(codes.Error, errMsg)
 	} else {
-		span.SetAttributes(attribute.String("mcp.tool.status", "ok"))
+		span.SetAttributes(attribute.String("mcp.status", "ok"))
+		if toolName != "" {
+			span.SetAttributes(attribute.String("mcp.tool.status", "ok"))
+		}
 		span.SetStatus(codes.Ok, "")
 	}
 
@@ -58,13 +69,17 @@ func EndSpan(span trace.Span, durationMS float64, isErr bool, errMsg string) {
 }
 
 // EndSpanTimeout marks a span as timed-out (treated as error).
-func EndSpanTimeout(span trace.Span) {
+// toolName must be non-empty only for tools/call spans.
+func EndSpanTimeout(span trace.Span, toolName string) {
 	msg := "span timed out — no response received within deadline"
 	span.SetAttributes(
-		attribute.String("mcp.tool.status", "error"),
+		attribute.String("mcp.status", "error"),
 		attribute.Bool("error", true),
 		attribute.String("error.message", msg),
 	)
+	if toolName != "" {
+		span.SetAttributes(attribute.String("mcp.tool.status", "error"))
+	}
 	span.SetStatus(codes.Error, msg)
 	span.End()
 }

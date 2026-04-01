@@ -113,7 +113,7 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 			stale := p.reqMap.EvictStale(spanTimeout)
 			for _, e := range stale {
 				p.logger.Warn("evicting stale span", "id", e.ID, "method", e.Req.Method)
-				telemetry.EndSpanTimeout(e.Req.Span)
+				telemetry.EndSpanTimeout(e.Req.Span, e.Req.ToolName)
 			}
 		}
 	}()
@@ -178,7 +178,7 @@ func (p *Proxy) handleSSEData(eventType, data string) {
 
 		durationMS := float64(time.Since(inflight.StartTime).Microseconds()) / 1000.0
 		isErr, errMsg := IsError(resp)
-		telemetry.EndSpan(inflight.Span, durationMS, isErr, errMsg)
+		telemetry.EndSpan(inflight.Span, durationMS, isErr, errMsg, inflight.ToolName)
 		p.logger.Debug("span ended", "id", id, "method", inflight.Method, "duration_ms", durationMS, "error", isErr)
 	}
 }
@@ -285,7 +285,7 @@ func (p *Proxy) cleanupSpan(req *RPCRequest, errMsg string) {
 	if inflight == nil {
 		return
 	}
-	telemetry.EndSpan(inflight.Span, 0, true, errMsg)
+	telemetry.EndSpan(inflight.Span, 0, true, errMsg, inflight.ToolName)
 }
 
 func (p *Proxy) reverseProxy() *httputil.ReverseProxy {

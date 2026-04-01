@@ -74,16 +74,18 @@ All flags can be set via a `.mcp-trace.yaml` file (see `.mcp-trace.yaml.example`
 
 Every traced call produces a span with these attributes:
 
-| Attribute | Description |
-|-----------|-------------|
-| `mcp.tool.name` | Tool name (tools/call only) |
-| `mcp.tool.duration_ms` | Wall-clock duration in ms |
-| `mcp.tool.status` | `ok` or `error` |
-| `mcp.server.target` | Upstream URL |
-| `mcp.request.id` | JSON-RPC request id |
-| `mcp.method` | JSON-RPC method |
-| `error` | `true` if errored |
-| `error.message` | Error message |
+| Attribute | Present on | Description |
+|-----------|------------|-------------|
+| `mcp.method` | all spans | JSON-RPC method |
+| `mcp.request.id` | all spans | JSON-RPC request id |
+| `mcp.server.target` | all spans | Upstream URL |
+| `mcp.duration_ms` | all spans | Wall-clock duration in ms |
+| `mcp.status` | all spans | `ok` or `error` |
+| `mcp.tool.name` | tools/call only | Tool name |
+| `mcp.tool.duration_ms` | tools/call only | Wall-clock duration in ms |
+| `mcp.tool.status` | tools/call only | `ok` or `error` |
+| `error` | error spans | `true` if errored |
+| `error.message` | error spans | Error message |
 
 Span names follow the pattern:
 - `mcp tools/call read_file` (tool calls)
