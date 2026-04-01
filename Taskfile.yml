@@ -83,6 +83,13 @@ tasks:
       - echo "Built {{.DIST_DIR}}:"
       - ls -lh {{.DIST_DIR}}/
 
+  smoke:
+    desc: Start Jaeger via Docker Compose and print the UI URL
+    cmds:
+      - docker compose -f docker/compose.jaeger.yml up -d
+      - echo "Jaeger UI → http://localhost:16686"
+      - echo "Run mcp-trace with: task run -- --target http://localhost:8000/sse"
+
   clean:
     desc: Remove build artifacts
     cmds:
