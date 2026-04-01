@@ -70,6 +70,33 @@ All flags can be set via a `.mcp-trace.yaml` file (see `.mcp-trace.yaml.example`
 | `--log-level` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `--config` | | Path to config file |
 
+## Environment variables
+
+Every CLI flag can also be set via an environment variable using the `MCP_TRACE_` prefix. Nested OTel keys use `_` as a separator (`.` → `_`).
+
+| Environment variable | Equivalent flag | Example |
+|----------------------|-----------------|---------|
+| `MCP_TRACE_TARGET` | `--target` | `http://localhost:8000/sse` |
+| `MCP_TRACE_PORT` | `--port` | `8001` |
+| `MCP_TRACE_OTEL_ENDPOINT` | `--otel-endpoint` | `localhost:4317` |
+| `MCP_TRACE_OTEL_HTTP` | `--otel-http` | `true` |
+| `MCP_TRACE_OTEL_HTTP_ENDPOINT` | `--otel-http-endpoint` | `http://localhost:4318` |
+| `MCP_TRACE_OTEL_INSECURE` | `--otel-insecure` | `true` |
+| `MCP_TRACE_SERVICE_NAME` | `--service-name` | `my-mcp-server` |
+| `MCP_TRACE_LOG_LEVEL` | `--log-level` | `debug` |
+
+Environment variables override config-file values. CLI flags take the highest precedence.
+
+**Docker example** — run mcp-trace entirely via environment, no flags needed:
+
+```bash
+docker run --rm \
+  -e MCP_TRACE_TARGET=http://host.docker.internal:8000/sse \
+  -e MCP_TRACE_OTEL_ENDPOINT=host.docker.internal:4317 \
+  -e MCP_TRACE_SERVICE_NAME=my-service \
+  ghcr.io/paperclipai/mcp-trace
+```
+
 ## Span schema
 
 Every traced call produces a span with these attributes:
