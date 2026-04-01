@@ -1,0 +1,6 @@
+bin/
+dist/
+.mcp-trace.yaml
+*.exe
+*.test
+coverage.out

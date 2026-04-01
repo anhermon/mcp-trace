@@ -1,0 +1,35 @@
+# mcp-trace configuration example
+# Copy to .mcp-trace.yaml and edit as needed.
+# All values shown are defaults; omit any you don't need to change.
+
+# Upstream MCP server URL (required).
+target: http://localhost:8000/sse
+
+# Local port to listen on.
+port: 8001
+
+# OpenTelemetry settings.
+otel:
+  # gRPC OTLP endpoint (host:port, no scheme).
+  endpoint: localhost:4317
+
+  # Set to true to use HTTP OTLP exporter instead of gRPC.
+  http: false
+
+  # HTTP OTLP endpoint (used when otel.http = true).
+  http_endpoint: http://localhost:4318
+
+  # Disable TLS verification (recommended for local dev).
+  insecure: true
+
+  # OTel resource service.name attribute.
+  service_name: mcp-trace
+
+# Trace all JSON-RPC methods, not just tools/call.
+trace_all: false
+
+# Include initialize/ping/notifications/* in traces.
+include_lifecycle: false
+
+# Log level: debug | info | warn | error
+log_level: info
