@@ -23,11 +23,11 @@ const spanTimeout = 30 * time.Second
 
 // Proxy is the transparent MCP SSE proxy.
 type Proxy struct {
-	target     *url.URL
-	filter     *Filter
-	tracer     trace.Tracer
-	reqMap     *RequestMap
-	logger     *slog.Logger
+	target *url.URL
+	filter *Filter
+	tracer trace.Tracer
+	reqMap *RequestMap
+	logger *slog.Logger
 
 	// postEndpoint is the upstream POST URL discovered from event: endpoint in the SSE stream.
 	postEndpointMu sync.RWMutex

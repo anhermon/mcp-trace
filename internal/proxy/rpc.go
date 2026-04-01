@@ -84,7 +84,7 @@ func IsError(resp *RPCResponse) (bool, string) {
 	}
 	if resp.Result != nil {
 		var r struct {
-			IsError bool   `json:"isError"`
+			IsError bool `json:"isError"`
 			Content []struct {
 				Text string `json:"text"`
 			} `json:"content"`
