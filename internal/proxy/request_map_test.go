@@ -59,7 +59,7 @@ func TestRequestMap_EvictStale(t *testing.T) {
 	m.Store("old", old)
 	m.Store("fresh", noopSpan())
 
-	stale := m.EvictStaleV2(30 * time.Second)
+	stale := m.EvictStale(30 * time.Second)
 	if len(stale) != 1 || stale[0].ID != "old" {
 		t.Errorf("expected 1 stale entry with id 'old', got %v", stale)
 	}

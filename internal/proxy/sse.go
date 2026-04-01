@@ -110,7 +110,7 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			stale := p.reqMap.EvictStaleV2(spanTimeout)
+			stale := p.reqMap.EvictStale(spanTimeout)
 			for _, e := range stale {
 				p.logger.Warn("evicting stale span", "id", e.ID, "method", e.Req.Method)
 				telemetry.EndSpanTimeout(e.Req.Span)
