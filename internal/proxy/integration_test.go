@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -102,9 +101,8 @@ type testHarness struct {
 	proxySrv *httptest.Server
 	exporter *tracetest.InMemoryExporter
 	tp       *sdktrace.TracerProvider
-	cancel   context.CancelFunc      // cancels SSE subscription
-	sseCh    <-chan string            // receives SSE data values (post-strip)
-	mu       sync.Mutex
+	cancel   context.CancelFunc // cancels SSE subscription
+	sseCh    <-chan string      // receives SSE data values (post-strip)
 }
 
 func newTestHarness(t *testing.T, filter *Filter) *testHarness {
