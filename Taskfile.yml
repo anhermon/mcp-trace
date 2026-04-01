@@ -83,6 +83,13 @@ tasks:
       - echo "Built {{.DIST_DIR}}:"
       - ls -lh {{.DIST_DIR}}/
 
+  smoke:
+    desc: Start Jaeger via Docker Compose and print the UI URL
+    cmds:
+      - docker compose -f docker/compose.jaeger.yml up -d
+      - echo "Jaeger UI → http://localhost:16686"
+      - 'echo "Run mcp-trace with: task run -- --target http://localhost:8000/sse"'
+
   clean:
     desc: Remove build artifacts
     cmds:
@@ -108,3 +115,17 @@ tasks:
     cmds:
       - go mod download
       - go mod verify
+
+  hooks:install:
+    desc: Install git pre-commit and pre-push hooks from scripts/hooks/
+    cmds:
+      - cp scripts/hooks/pre-commit .git/hooks/pre-commit
+      - cp scripts/hooks/pre-push   .git/hooks/pre-push
+      - chmod +x .git/hooks/pre-commit .git/hooks/pre-push
+      - echo "Hooks installed. pre-commit runs 'task ci'; pre-push runs 'task check'."
+
+  hooks:uninstall:
+    desc: Remove installed git hooks
+    cmds:
+      - rm -f .git/hooks/pre-commit .git/hooks/pre-push
+      - echo "Hooks removed."

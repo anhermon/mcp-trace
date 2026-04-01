@@ -109,10 +109,27 @@ Span names follow the pattern:
 ## Development
 
 ```bash
-make build    # build binary to bin/mcp-trace
-make test     # run all tests
-make release  # cross-compile all platforms to dist/
+task build    # build binary to bin/mcp-trace
+task test     # run all tests
+task ci       # full pipeline: vet + test + lint + build
+task release  # cross-compile all platforms to dist/
 ```
+
+### Pre-commit hooks
+
+Install hooks that run `task ci` before every commit and `task check` before every push:
+
+```bash
+task hooks:install
+```
+
+Remove hooks:
+
+```bash
+task hooks:uninstall
+```
+
+Hooks are stored in `scripts/hooks/` and symlinked into `.git/hooks/`. Bypass in emergencies with `--no-verify` (use sparingly).
 
 ## Roadmap
 

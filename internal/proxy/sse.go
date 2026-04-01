@@ -23,11 +23,11 @@ const spanTimeout = 30 * time.Second
 
 // Proxy is the transparent MCP SSE proxy.
 type Proxy struct {
-	target     *url.URL
-	filter     *Filter
-	tracer     trace.Tracer
-	reqMap     *RequestMap
-	logger     *slog.Logger
+	target *url.URL
+	filter *Filter
+	tracer trace.Tracer
+	reqMap *RequestMap
+	logger *slog.Logger
 
 	// postEndpoint is the upstream POST URL discovered from event: endpoint in the SSE stream.
 	postEndpointMu sync.RWMutex
@@ -110,7 +110,7 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			stale := p.reqMap.EvictStaleV2(spanTimeout)
+			stale := p.reqMap.EvictStale(spanTimeout)
 			for _, e := range stale {
 				p.logger.Warn("evicting stale span", "id", e.ID, "method", e.Req.Method)
 				telemetry.EndSpanTimeout(e.Req.Span)

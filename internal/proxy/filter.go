@@ -12,11 +12,11 @@ type Filter struct {
 
 // ShouldTrace returns true if the given JSON-RPC method should produce a span.
 func (f *Filter) ShouldTrace(method string) bool {
-	// Lifecycle methods are suppressed unless explicitly enabled.
-	if isLifecycle(method) && !f.IncludeLifecycle {
-		return false
+	// Lifecycle methods are controlled solely by IncludeLifecycle.
+	if isLifecycle(method) {
+		return f.IncludeLifecycle
 	}
-	// Default: only tools/call.
+	// Default: only tools/call; TraceAll opens up everything else.
 	if !f.TraceAll && method != "tools/call" {
 		return false
 	}

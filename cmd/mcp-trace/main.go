@@ -88,8 +88,9 @@ func serve(cfg config.Config) error {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: p,
+		Addr:              addr,
+		Handler:           p,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Graceful shutdown on SIGINT / SIGTERM.
