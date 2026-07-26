@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [master, dev]
+    # Without this the release job below can never run: its
+    # `if: startsWith(github.ref, 'refs/tags/v')` guard is false on branch pushes.
+    tags: ['v*']
   pull_request:
     branches: [master, dev]
 
@@ -110,7 +113,8 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned: 'latest' silently jumped to v2 and rejected the v1 config.
+          version: v2.12.2
 
   # ── Branch sanity guard ──────────────────────────────────────────────────────
   # Prevents direct merges from feature branches to main (must go through dev).

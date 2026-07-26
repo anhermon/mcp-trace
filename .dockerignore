@@ -1,8 +1,8 @@
-bin/
+.git
+.github
 dist/
+bin/
 .task/
-.mcp-trace.yaml
-*.exe
-*.test
 coverage.out
 coverage.html
+*.test

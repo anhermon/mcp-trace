@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipai/mcp-trace/internal/config"
-	"github.com/paperclipai/mcp-trace/internal/proxy"
-	"github.com/paperclipai/mcp-trace/internal/telemetry"
+	"github.com/anhermon/mcp-trace/internal/config"
+	"github.com/anhermon/mcp-trace/internal/proxy"
+	"github.com/anhermon/mcp-trace/internal/telemetry"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -29,14 +29,13 @@ func main() {
 
 func run() error {
 	v := viper.New()
-	var cfgFile string
 
 	root := &cobra.Command{
 		Use:     "mcp-trace",
 		Short:   "Transparent MCP proxy with OpenTelemetry span emission",
 		Version: Version,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfgFile, _ = cmd.Flags().GetString("config")
+			cfgFile, _ := cmd.Flags().GetString("config")
 			cfg, err := config.Load(v, cfgFile)
 			if err != nil {
 				return err
@@ -46,7 +45,6 @@ func run() error {
 	}
 
 	config.BindFlags(root, v)
-	_ = cfgFile
 
 	return root.Execute()
 }
@@ -64,6 +62,7 @@ func serve(cfg config.Config) error {
 		HTTPEndpoint: cfg.OTel.HTTPEndpoint,
 		Insecure:     cfg.OTel.Insecure,
 		ServiceName:  cfg.OTel.ServiceName,
+		Logger:       logger,
 	})
 	if err != nil {
 		return fmt.Errorf("initialising OTel: %w", err)

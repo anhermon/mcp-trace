@@ -103,7 +103,7 @@ tasks:
   docker:build:
     desc: Build Docker image
     cmds:
-      - docker build -t mcp-trace:{{.VERSION}} .
+      - docker build --build-arg VERSION={{.VERSION}} -t mcp-trace:{{.VERSION}} .
 
   docker:run:
     desc: Run Docker image (pass flags via CLI_ARGS)

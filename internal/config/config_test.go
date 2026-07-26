@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
@@ -45,7 +46,11 @@ func TestLoad_MissingTarget(t *testing.T) {
 func TestLoad_EnvOverride(t *testing.T) {
 	t.Setenv("MCP_TRACE_TARGET", "http://test-server")
 
+	// BindFlags registers the "target" key with viper. The real binary always
+	// calls it before Load; without it viper has no key for AutomaticEnv to fill.
 	v := viper.New()
+	BindFlags(&cobra.Command{}, v)
+
 	cfg, err := Load(v, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

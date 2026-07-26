@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,10 +28,22 @@ import (
 // POST /message: receives a JSON-RPC request and pushes the response via SSE.
 type fakeUpstream struct {
 	pushCh chan string // SSE data payloads pushed by handlePost
+
+	// endpointPath is advertised via event:endpoint. Defaults to /message.
+	endpointPath string
+
+	mu         sync.Mutex
+	lastHeader http.Header // headers of the most recent POST
 }
 
 func newFakeUpstream() *fakeUpstream {
-	return &fakeUpstream{pushCh: make(chan string, 16)}
+	return &fakeUpstream{pushCh: make(chan string, 16), endpointPath: "/message"}
+}
+
+func (f *fakeUpstream) lastPostHeader() http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastHeader
 }
 
 func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +68,7 @@ func (f *fakeUpstream) serveSSE(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Advertise the POST endpoint.
-	fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
+	fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", f.endpointPath)
 	flusher.Flush()
 
 	for {
@@ -73,6 +86,10 @@ func (f *fakeUpstream) serveSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeUpstream) servePost(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.lastHeader = r.Header.Clone()
+	f.mu.Unlock()
+
 	var req RPCRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -81,9 +98,13 @@ func (f *fakeUpstream) servePost(w http.ResponseWriter, r *http.Request) {
 
 	// Return a tool error for "fail_tool"; success for everything else.
 	var result json.RawMessage
-	if req.Method == "tools/call" && ToolCallParams(req.Params) == "fail_tool" {
+	switch {
+	case req.Method == "tools/call" && ToolCallParams(req.Params) == "fail_tool":
 		result = json.RawMessage(`{"isError":true,"content":[{"text":"tool execution failed"}]}`)
-	} else {
+	case req.Method == "tools/call" && ToolCallParams(req.Params) == "big_tool":
+		// A tool result far larger than bufio.Scanner's 64KB default token cap.
+		result, _ = json.Marshal(map[string]any{"content": []map[string]string{{"text": strings.Repeat("x", bigPayloadSize)}}})
+	default:
 		result = json.RawMessage(`{"result":"ok"}`)
 	}
 
@@ -98,6 +119,7 @@ func (f *fakeUpstream) servePost(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type testHarness struct {
+	up       *fakeUpstream
 	proxySrv *httptest.Server
 	exporter *tracetest.InMemoryExporter
 	tp       *sdktrace.TracerProvider
@@ -106,9 +128,12 @@ type testHarness struct {
 }
 
 func newTestHarness(t *testing.T, filter *Filter) *testHarness {
+	return newTestHarnessWith(t, filter, newFakeUpstream())
+}
+
+func newTestHarnessWith(t *testing.T, filter *Filter, up *fakeUpstream) *testHarness {
 	t.Helper()
 
-	up := newFakeUpstream()
 	upSrv := httptest.NewServer(up)
 
 	exp := tracetest.NewInMemoryExporter()
@@ -132,6 +157,7 @@ func newTestHarness(t *testing.T, filter *Filter) *testHarness {
 	sseCh := openSSE(t, ctx, proxySrv.URL+"/sse")
 
 	h := &testHarness{
+		up:       up,
 		proxySrv: proxySrv,
 		exporter: exp,
 		tp:       tp,
@@ -140,7 +166,7 @@ func newTestHarness(t *testing.T, filter *Filter) *testHarness {
 	}
 
 	// Wait until the proxy has discovered the upstream POST endpoint.
-	h.waitForData(t, "/message", 3*time.Second)
+	h.waitForData(t, up.endpointPath, 3*time.Second)
 	return h
 }
 
@@ -158,6 +184,7 @@ func openSSE(t *testing.T, ctx context.Context, url string) <-chan string {
 		defer resp.Body.Close()
 		defer close(ch)
 		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxSSELine)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "data:") {
@@ -206,6 +233,21 @@ func (h *testHarness) waitForSSEResponse(t *testing.T) {
 	// Small pause: the span is ended by the proxy immediately after it forwards
 	// the SSE line, so we yield to let that goroutine complete.
 	time.Sleep(20 * time.Millisecond)
+}
+
+// recvSSE returns the next SSE data value, failing on timeout.
+func (h *testHarness) recvSSE(t *testing.T) string {
+	t.Helper()
+	select {
+	case v, ok := <-h.sseCh:
+		if !ok {
+			t.Fatal("SSE stream closed before response")
+		}
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SSE response")
+		return ""
+	}
 }
 
 // post sends a JSON-RPC request body to the proxy.

@@ -33,7 +33,10 @@ func StartSpan(ctx context.Context, tracer trace.Tracer, attrs SpanAttrs) (conte
 		spanAttrs = append(spanAttrs, attribute.String("mcp.tool.name", attrs.ToolName))
 	}
 
-	return tracer.Start(ctx, name, trace.WithAttributes(spanAttrs...))
+	// Client kind: the proxy is calling out to the upstream MCP server.
+	return tracer.Start(ctx, name,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(spanAttrs...))
 }
 
 // EndSpan finalises a span with duration and status.

@@ -32,24 +32,21 @@ mcp-trace --target http://localhost:8000/sse
 
 Download from [GitHub Releases](https://github.com/anhermon/mcp-trace/releases).
 
-### Homebrew (coming soon)
+### Build from source
 
 ```bash
-brew install paperclipai/tap/mcp-trace
+go install github.com/anhermon/mcp-trace/cmd/mcp-trace@latest
 ```
 
 ### Docker
 
+No image is published. Build one locally:
+
 ```bash
-docker run --rm ghcr.io/paperclipai/mcp-trace \
+task docker:build
+docker run --rm mcp-trace:dev \
   --target http://host.docker.internal:8000/sse \
   --otel-endpoint host.docker.internal:4317
-```
-
-### Build from source
-
-```bash
-go install github.com/paperclipai/mcp-trace/cmd/mcp-trace@latest
 ```
 
 ## Configuration
@@ -82,8 +79,13 @@ Every CLI flag can also be set via an environment variable using the `MCP_TRACE_
 | `MCP_TRACE_OTEL_HTTP` | `--otel-http` | `true` |
 | `MCP_TRACE_OTEL_HTTP_ENDPOINT` | `--otel-http-endpoint` | `http://localhost:4318` |
 | `MCP_TRACE_OTEL_INSECURE` | `--otel-insecure` | `true` |
-| `MCP_TRACE_SERVICE_NAME` | `--service-name` | `my-mcp-server` |
+| `MCP_TRACE_OTEL_SERVICE_NAME` | `--service-name` | `my-mcp-server` |
+| `MCP_TRACE_TRACE_ALL` | `--trace-all` | `true` |
+| `MCP_TRACE_INCLUDE_LIFECYCLE` | `--include-lifecycle` | `true` |
 | `MCP_TRACE_LOG_LEVEL` | `--log-level` | `debug` |
+
+> The service-name variable is `MCP_TRACE_OTEL_SERVICE_NAME`, not
+> `MCP_TRACE_SERVICE_NAME` — the underlying config key is `otel.service_name`.
 
 Environment variables override config-file values. CLI flags take the highest precedence.
 
@@ -93,8 +95,8 @@ Environment variables override config-file values. CLI flags take the highest pr
 docker run --rm \
   -e MCP_TRACE_TARGET=http://host.docker.internal:8000/sse \
   -e MCP_TRACE_OTEL_ENDPOINT=host.docker.internal:4317 \
-  -e MCP_TRACE_SERVICE_NAME=my-service \
-  ghcr.io/paperclipai/mcp-trace
+  -e MCP_TRACE_OTEL_SERVICE_NAME=my-service \
+  mcp-trace:dev
 ```
 
 ## Span schema
@@ -113,6 +115,11 @@ Every traced call produces a span with these attributes:
 | `mcp.tool.status` | tools/call only | `ok` or `error` |
 | `error` | error spans | `true` if errored |
 | `error.message` | error spans | Error message |
+
+Spans are emitted with `SpanKind = client`. If the caller sends a `traceparent`
+header, the span is created as a child of that trace; either way mcp-trace
+injects `traceparent` into the request it forwards upstream, so the MCP server
+can continue the same trace.
 
 Span names follow the pattern:
 - `mcp tools/call read_file` (tool calls)
@@ -158,7 +165,7 @@ Remove hooks:
 task hooks:uninstall
 ```
 
-Hooks are stored in `scripts/hooks/` and symlinked into `.git/hooks/`. Bypass in emergencies with `--no-verify` (use sparingly).
+Hooks are stored in `scripts/hooks/` and copied into `.git/hooks/`. Bypass in emergencies with `--no-verify` (use sparingly).
 
 ## Roadmap
 

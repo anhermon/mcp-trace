@@ -3,16 +3,16 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Provider wraps the OTel TracerProvider with a shutdown function.
@@ -38,6 +38,8 @@ type Config struct {
 	Insecure bool
 	// ServiceName is set as resource.service.name.
 	ServiceName string
+	// Logger receives asynchronous OTel export errors. Optional; defaults to slog.Default.
+	Logger *slog.Logger
 }
 
 // New initialises an OTel TracerProvider from cfg.
@@ -46,6 +48,16 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		exp sdktrace.SpanExporter
 		err error
 	)
+
+	// Span export happens asynchronously in the batcher, so failures are
+	// otherwise completely silent. Surface them on the application logger.
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		logger.Error("otel error", "err", err)
+	}))
 
 	if cfg.UseHTTP {
 		exp, err = newHTTPExporter(ctx, cfg)
@@ -70,6 +82,8 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
+	// Default propagator is a no-op; without this, traceparent injection is silently dead.
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	return &Provider{
 		tp:     tp,
@@ -82,7 +96,10 @@ func newGRPCExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, er
 		otlptracegrpc.WithEndpoint(cfg.GRPCEndpoint),
 	}
 	if cfg.Insecure {
-		opts = append(opts, otlptracegrpc.WithDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
+		// Must be WithInsecure, not WithDialOption(grpc.WithTransportCredentials(...)):
+		// the exporter appends its own TLS credentials after user dial options, and the
+		// last WithTransportCredentials wins — so a dial option here is silently overridden.
+		opts = append(opts, otlptracegrpc.WithInsecure())
 	}
 	return otlptracegrpc.New(ctx, opts...)
 }
