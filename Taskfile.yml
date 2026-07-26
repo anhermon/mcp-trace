@@ -103,7 +103,8 @@ tasks:
   docker:build:
     desc: Build Docker image
     cmds:
-      - docker build --build-arg VERSION={{.VERSION}} -t mcp-trace:{{.VERSION}} .
+      # Also tag :dev so the README’s docker run line works regardless of git describe.
+      - docker build --build-arg VERSION={{.VERSION}} -t mcp-trace:{{.VERSION}} -t mcp-trace:dev .
 
   docker:run:
     desc: Run Docker image (pass flags via CLI_ARGS)
