@@ -111,7 +111,7 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           # Pinned: 'latest' silently jumped to v2 and rejected the v1 config.
           version: v2.12.2
