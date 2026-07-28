@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -56,7 +57,9 @@ func TestRegression_PerSessionPostRouting(t *testing.T) {
 
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	p, err := New(upSrv.URL, &Filter{}, tp.Tracer("t"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proxyCtx, proxyCancel := context.WithCancel(context.Background())
+	defer proxyCancel()
+	p, err := New(proxyCtx, upSrv.URL, &Filter{}, tp.Tracer("t"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,13 +95,123 @@ func TestRegression_PerSessionPostRouting(t *testing.T) {
 	}
 }
 
+// TestRegression_StaleSpanEvictedWithoutSSEStream is the regression test for the
+// leaked in-flight span: the eviction ticker used to be created inside
+// handleSSE, so a request with no SSE stream open (or one in flight when a
+// stream dropped) was never ended, never exported, and never freed from reqMap.
+// Nothing in this test ever opens an SSE stream — on the old code it hangs.
+func TestRegression_StaleSpanEvictedWithoutSSEStream(t *testing.T) {
+	// Upstream that accepts the POST and then simply never answers.
+	upSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer upSrv.Close()
+
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p, err := newWithEviction(ctx, upSrv.URL, &Filter{}, tp.Tracer("t"),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Millisecond, 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxySrv := httptest.NewServer(p)
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/message", "application/json",
+		strings.NewReader(`{"jsonrpc":"2.0","id":"stale","method":"tools/call","params":{"name":"slow_tool"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	var spans tracetest.SpanStubs
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if spans = exp.GetSpans(); len(spans) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("stale span was never evicted or exported: got %d spans, want 1", len(spans))
+	}
+
+	attrs := map[attribute.Key]attribute.Value{}
+	for _, a := range spans[0].Attributes {
+		attrs[a.Key] = a.Value
+	}
+	// Timeout spans must carry the documented duration attributes too.
+	for _, key := range []string{"mcp.duration_ms", "mcp.tool.duration_ms", "mcp.status", "mcp.tool.status"} {
+		if _, ok := attrs[attribute.Key(key)]; !ok {
+			t.Errorf("evicted span missing documented attribute %q", key)
+		}
+	}
+	if got := attrs["mcp.status"].AsString(); got != "error" {
+		t.Errorf("mcp.status = %q, want %q", got, "error")
+	}
+
+	// The map entry must be freed, not just the span ended.
+	if p.reqMap.Take("stale") != nil {
+		t.Error("evicted request is still in the request map")
+	}
+}
+
+// TestRegression_CamelCaseSessionIDFallsBackToPathReconstruction covers the
+// untested fallback: sessionIDOf only recognises the literal query key
+// session_id, so a server advertising sessionId registers no session and the
+// POST must still reach upstream via path reconstruction.
+func TestRegression_CamelCaseSessionIDFallsBackToPathReconstruction(t *testing.T) {
+	up := newSessionUpstream()
+	up.queryKey = "sessionId"
+	upSrv := httptest.NewServer(up)
+	defer upSrv.Close()
+
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p, err := New(ctx, upSrv.URL, &Filter{}, tp.Tracer("t"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxySrv := httptest.NewServer(p)
+	defer proxySrv.Close()
+
+	sseCtx, sseCancel := context.WithCancel(context.Background())
+	defer sseCancel()
+	ch := openSSE(t, sseCtx, proxySrv.URL+"/sse?want=aaa")
+	waitFor(t, ch, "/messages/?sessionId=aaa")
+
+	// No session was registered, so the proxy must rebuild the upstream URL from
+	// the incoming path and query.
+	resp, err := http.Post(proxySrv.URL+"/messages/?sessionId=aaa", "application/json",
+		strings.NewReader(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"t"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	select {
+	case got := <-up.posted:
+		if got != "/messages/?sessionId=aaa" {
+			t.Errorf("POST landed at %q, want %q", got, "/messages/?sessionId=aaa")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream never received the POST via path reconstruction")
+	}
+}
+
 // sessionUpstream advertises a distinct per-session endpoint, like a real MCP server.
 type sessionUpstream struct {
-	posted chan string // request URIs of POSTs received
+	posted   chan string // request URIs of POSTs received
+	queryKey string      // session id query key it advertises
 }
 
 func newSessionUpstream() *sessionUpstream {
-	return &sessionUpstream{posted: make(chan string, 8)}
+	return &sessionUpstream{posted: make(chan string, 8), queryKey: "session_id"}
 }
 
 func (s *sessionUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +227,7 @@ func (s *sessionUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "event: endpoint\ndata: /messages/?session_id=%s\n\n", r.URL.Query().Get("want"))
+	fmt.Fprintf(w, "event: endpoint\ndata: /messages/?%s=%s\n\n", s.queryKey, r.URL.Query().Get("want"))
 	flusher.Flush()
 	<-r.Context().Done()
 }

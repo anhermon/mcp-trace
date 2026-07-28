@@ -140,13 +140,16 @@ func newTestHarnessWith(t *testing.T, filter *Filter, up *fakeUpstream) *testHar
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 	tracer := tp.Tracer("integration-test")
 
-	p, err := New(upSrv.URL, filter, tracer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Cancelled in t.Cleanup so the eviction goroutine does not outlive the test.
+	proxyCtx, proxyCancel := context.WithCancel(context.Background())
+	p, err := New(proxyCtx, upSrv.URL, filter, tracer, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	proxySrv := httptest.NewServer(p)
 
 	t.Cleanup(func() {
+		proxyCancel()
 		proxySrv.Close()
 		upSrv.Close()
 		_ = tp.Shutdown(context.Background())

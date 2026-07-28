@@ -1,5 +1,10 @@
 # mcp-trace
 
+[![CI](https://github.com/anhermon/mcp-trace/actions/workflows/ci.yml/badge.svg)](https://github.com/anhermon/mcp-trace/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Release](https://img.shields.io/github/v/release/anhermon/mcp-trace?sort=semver)](https://github.com/anhermon/mcp-trace/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 **See what your MCP server is actually doing.** An agent calls a tool, it takes
 four seconds or fails, and all you have is a client that says "using tool". No
 timings, no error text, no history — nothing you can debug or put on a dashboard.
@@ -11,7 +16,10 @@ duration, ok/error, and trace context propagated both ways — in Jaeger, Tempo,
 Honeycomb, or anything else that speaks OTLP. The client does not change; you
 point it at the proxy's port instead of the server's.
 
-![mcp-trace demo](docs/img/demo.gif)
+![Tool-call spans in Jaeger](docs/img/jaeger-search.png)
+
+Every row is one MCP tool call: name, duration, and a red badge on the failed
+one.
 
 ```
 MCP Client  →  mcp-trace :8001  →  MCP Server :8000
@@ -33,10 +41,11 @@ open http://localhost:16686   # Jaeger UI → select service "mcp-trace"
 
 Spans appear within a few seconds. `docker compose down` when you are done.
 
-![Tool-call spans in Jaeger](docs/img/jaeger-search.png)
+![mcp-trace demo](docs/img/demo.gif)
 
-Every row is one MCP tool call: name, duration, and a red badge on the failed
-one. The demo traffic comes from `examples/demo` — delete the `demo-server` and
+*The same bundle, start to first trace.*
+
+The demo traffic comes from `examples/demo` — delete the `demo-server` and
 `demo-client` services from `docker-compose.yml` and point `--target` at your
 own server to trace the real thing.
 
@@ -63,10 +72,14 @@ Build the image locally:
 
 ```bash
 docker build -t mcp-trace:dev .
-docker run --rm mcp-trace:dev \
+docker run --rm -p 8001:8001 mcp-trace:dev \
   --target http://host.docker.internal:8000/sse \
   --otel-endpoint host.docker.internal:4317
 ```
+
+`-p 8001:8001` is what makes the proxy reachable from the host — without it the
+container listens on `:8001` inside its own network namespace and your MCP
+client cannot connect.
 
 A published `ghcr.io/anhermon/mcp-trace` image (linux/amd64 + linux/arm64) is
 built and pushed by CI on the next tagged release; until that tag is cut, build
@@ -115,7 +128,7 @@ Environment variables override config-file values. CLI flags take the highest pr
 **Docker example** — run mcp-trace entirely via environment, no flags needed:
 
 ```bash
-docker run --rm \
+docker run --rm -p 8001:8001 \
   -e MCP_TRACE_TARGET=http://host.docker.internal:8000/sse \
   -e MCP_TRACE_OTEL_ENDPOINT=host.docker.internal:4317 \
   -e MCP_TRACE_OTEL_SERVICE_NAME=my-service \
@@ -171,6 +184,22 @@ Then point the client's SSE URL at the proxy instead of the server:
 
 mcp-trace speaks the MCP HTTP+SSE transport. stdio servers are not supported yet
 (see Roadmap).
+
+### Limitation: servers advertising an absolute POST endpoint
+
+In the HTTP+SSE transport the server tells the client where to POST, via an
+`event: endpoint` message at the start of the stream. mcp-trace forwards that
+value through unchanged. If a server advertises a **relative** path
+(`/messages/?session_id=…`) — which the mainstream Python and TypeScript MCP
+SDKs do — the client resolves it against the proxy's own origin and everything
+is traced.
+
+If a server advertises an **absolute** URL (`http://server:8000/messages/…`),
+the client POSTs straight to the server, bypassing the proxy. The SSE stream
+still works, so nothing errors — you simply get **zero tool-call spans**. If you
+see traffic flowing but no spans, check what your server puts in `event:
+endpoint`; if it is absolute, terminate it behind a reverse proxy that rewrites
+the value, or configure the server to advertise a relative path.
 
 ## Development
 

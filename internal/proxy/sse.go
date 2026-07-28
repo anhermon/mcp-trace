@@ -4,6 +4,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,7 +21,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const spanTimeout = 30 * time.Second
+const (
+	spanTimeout   = 30 * time.Second
+	evictInterval = 10 * time.Second
+)
 
 // maxSSELine caps a single SSE line. bufio.Scanner defaults to 64KB, which
 // silently truncates and then kills the stream on large tool results; file
@@ -52,20 +56,51 @@ func sessionIDOf(rawURL string) string {
 	return u.Query().Get("session_id")
 }
 
-// New creates a Proxy that forwards to target.
-func New(targetURL string, filter *Filter, tracer trace.Tracer, logger *slog.Logger) (*Proxy, error) {
+// New creates a Proxy that forwards to target. The stale-span evictor runs for
+// as long as ctx lives.
+func New(ctx context.Context, targetURL string, filter *Filter, tracer trace.Tracer, logger *slog.Logger) (*Proxy, error) {
+	return newWithEviction(ctx, targetURL, filter, tracer, logger, evictInterval, spanTimeout)
+}
+
+// newWithEviction is New with the evictor's timings injectable, so tests do not
+// have to wait 30 seconds.
+func newWithEviction(ctx context.Context, targetURL string, filter *Filter, tracer trace.Tracer, logger *slog.Logger, interval, timeout time.Duration) (*Proxy, error) {
 	u, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing target URL: %w", err)
 	}
-	return &Proxy{
+	p := &Proxy{
 		target:   u,
 		filter:   filter,
 		tracer:   tracer,
 		reqMap:   NewRequestMap(),
 		logger:   logger,
 		sessions: make(map[string]string),
-	}, nil
+	}
+	go p.evictLoop(ctx, interval, timeout)
+	return p, nil
+}
+
+// evictLoop ends spans whose response never arrived. It is owned by the proxy,
+// not by an SSE connection: a request in flight when a stream drops (client
+// reconnect, network blip) would otherwise never be ended, never exported, and
+// never freed from reqMap. Returning on ctx.Done() is what stops the goroutine —
+// ticker.Stop() alone does not.
+func (p *Proxy) evictLoop(ctx context.Context, interval, timeout time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, e := range p.reqMap.EvictStale(timeout) {
+				p.logger.Warn("evicting stale span", "id", e.ID, "method", e.Req.Method)
+				durationMS := float64(time.Since(e.Req.StartTime).Microseconds()) / 1000.0
+				telemetry.EndSpanTimeout(e.Req.Span, durationMS, e.Req.ToolName)
+			}
+		}
+	}
 }
 
 // ServeHTTP dispatches incoming requests.
@@ -123,28 +158,6 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		p.logger.Warn("ResponseWriter does not support flushing")
 	}
-
-	// Start stale-span eviction ticker. done closes when this connection ends —
-	// ticker.Stop() alone does not close the channel, so the goroutine would leak.
-	ticker := time.NewTicker(10 * time.Second)
-	done := make(chan struct{})
-	defer func() {
-		ticker.Stop()
-		close(done)
-	}()
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				for _, e := range p.reqMap.EvictStale(spanTimeout) {
-					p.logger.Warn("evicting stale span", "id", e.ID, "method", e.Req.Method)
-					telemetry.EndSpanTimeout(e.Req.Span, e.Req.ToolName)
-				}
-			}
-		}
-	}()
 
 	// Forget this connection's session endpoint when the stream ends.
 	var sessionID string

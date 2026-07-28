@@ -28,4 +28,6 @@ ENTRYPOINT ["/demo"]
 FROM scratch AS runtime
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /mcp-trace /mcp-trace
+# Default --port. Still needs -p 8001:8001 to be reachable from the host.
+EXPOSE 8001
 ENTRYPOINT ["/mcp-trace"]

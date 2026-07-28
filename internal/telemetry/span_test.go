@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -88,12 +91,46 @@ func TestEndSpan_Error_NonTool(t *testing.T) {
 	EndSpan(span, 0, true, "upstream error", "")
 }
 
-func TestEndSpanTimeout_Tool(t *testing.T) {
-	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
-	EndSpanTimeout(span, "read_file")
-}
+// TestEndSpanTimeout_MatchesDocumentedSchema pins the README's claim that
+// mcp.duration_ms is present on *all* spans — timeout spans used to omit it
+// (and mcp.tool.duration_ms) entirely.
+func TestEndSpanTimeout_MatchesDocumentedSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		toolName string
+		want     []string
+	}{
+		{"tool", "read_file", []string{"mcp.duration_ms", "mcp.tool.duration_ms", "mcp.status", "mcp.tool.status", "error", "error.message"}},
+		{"non-tool", "", []string{"mcp.duration_ms", "mcp.status", "error", "error.message"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exp := tracetest.NewInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+			_, span := tp.Tracer("test").Start(context.Background(), "test")
 
-func TestEndSpanTimeout_NonTool(t *testing.T) {
-	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
-	EndSpanTimeout(span, "")
+			EndSpanTimeout(span, 42.5, tc.toolName)
+
+			stubs := exp.GetSpans()
+			if len(stubs) != 1 {
+				t.Fatalf("expected 1 exported span, got %d", len(stubs))
+			}
+			got := map[attribute.Key]attribute.Value{}
+			for _, a := range stubs[0].Attributes {
+				got[a.Key] = a.Value
+			}
+			for _, key := range tc.want {
+				if _, ok := got[attribute.Key(key)]; !ok {
+					t.Errorf("timeout span missing documented attribute %q", key)
+				}
+			}
+			if d := got["mcp.duration_ms"].AsFloat64(); d != 42.5 {
+				t.Errorf("mcp.duration_ms = %v, want 42.5", d)
+			}
+			if tc.toolName == "" {
+				if _, ok := got["mcp.tool.duration_ms"]; ok {
+					t.Error("non-tool span must not carry mcp.tool.duration_ms")
+				}
+			}
+		})
+	}
 }
