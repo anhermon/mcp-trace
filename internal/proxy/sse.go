@@ -31,6 +31,10 @@ const (
 // reads and search results routinely exceed that.
 const maxSSELine = 8 << 20 // 8 MiB
 
+// maxArgsLen caps recorded tool arguments. Trace backends reject or silently
+// drop oversized attributes, and a truncated argument still identifies the call.
+const maxArgsLen = 2048
+
 // Proxy is the transparent MCP SSE proxy.
 type Proxy struct {
 	target *url.URL
@@ -39,21 +43,41 @@ type Proxy struct {
 	reqMap *RequestMap
 	logger *slog.Logger
 
-	// sessions maps an MCP session id to the upstream POST endpoint advertised
-	// for that session via event: endpoint. Keyed per session because concurrent
-	// clients each get their own endpoint and would otherwise cross-route.
+	// CaptureArgs records full tool arguments on spans. Off by default: tool
+	// arguments are user data and routinely carry paths, queries and secrets.
+	// Set before serving.
+	CaptureArgs bool
+
+	// sessions maps an MCP session id to what we know about that session.
+	// Keyed per session because concurrent clients each get their own endpoint
+	// and would otherwise cross-route.
 	sessionsMu sync.RWMutex
-	sessions   map[string]string
+	sessions   map[string]*session
+}
+
+// session is the per-connection state the proxy learns as a client talks to it.
+type session struct {
+	endpoint   string // upstream POST endpoint from event: endpoint
+	clientName string // from initialize params.clientInfo
+	clientVer  string
 }
 
 // sessionIDOf extracts the MCP session id from an endpoint URL or request URL.
 // Returns "" when the URL carries no session id.
+//
+// Both spellings are checked on purpose: the Python SDK advertises
+// `session_id`, the TypeScript SDK advertises `sessionId`. Accepting only one
+// silently disables every session-scoped behaviour against half the ecosystem.
 func sessionIDOf(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return ""
 	}
-	return u.Query().Get("session_id")
+	q := u.Query()
+	if id := q.Get("session_id"); id != "" {
+		return id
+	}
+	return q.Get("sessionId")
 }
 
 // New creates a Proxy that forwards to target. The stale-span evictor runs for
@@ -75,7 +99,7 @@ func newWithEviction(ctx context.Context, targetURL string, filter *Filter, trac
 		tracer:   tracer,
 		reqMap:   NewRequestMap(),
 		logger:   logger,
-		sessions: make(map[string]string),
+		sessions: make(map[string]*session),
 	}
 	go p.evictLoop(ctx, interval, timeout)
 	return p, nil
@@ -95,9 +119,9 @@ func (p *Proxy) evictLoop(ctx context.Context, interval, timeout time.Duration) 
 			return
 		case <-ticker.C:
 			for _, e := range p.reqMap.EvictStale(timeout) {
-				p.logger.Warn("evicting stale span", "id", e.ID, "method", e.Req.Method)
-				durationMS := float64(time.Since(e.Req.StartTime).Microseconds()) / 1000.0
-				telemetry.EndSpanTimeout(e.Req.Span, durationMS, e.Req.ToolName)
+				p.logger.Warn("evicting stale span", "id", e.RequestID, "session", e.SessionID, "method", e.Method)
+				p.endInFlight(e, telemetry.StatusTimeout,
+					"no response received within the span deadline")
 			}
 		}
 	}
@@ -159,13 +183,30 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 		p.logger.Warn("ResponseWriter does not support flushing")
 	}
 
-	// Forget this connection's session endpoint when the stream ends.
+	// Forget this connection's session when the stream ends, and close out any
+	// call still waiting on it. Those calls can never be answered — the channel
+	// their response would have arrived on is gone — so letting them sit until
+	// the eviction deadline would report the deadline as the call's duration
+	// rather than when it actually broke.
 	var sessionID string
 	defer func() {
-		if sessionID != "" {
-			p.sessionsMu.Lock()
-			delete(p.sessions, sessionID)
-			p.sessionsMu.Unlock()
+		if sessionID == "" {
+			return
+		}
+		p.sessionsMu.Lock()
+		delete(p.sessions, sessionID)
+		p.sessionsMu.Unlock()
+
+		// Whose fault the stream ended decides where you look next: the client
+		// going away is a client bug, the upstream going away is a server bug.
+		reason := "upstream SSE stream closed before the response arrived (server died, restarted, or dropped the connection)"
+		if r.Context().Err() != nil {
+			reason = "client disconnected before the response arrived"
+		}
+		for _, e := range p.reqMap.TakeSession(sessionID) {
+			p.logger.Warn("stream closed with request in flight",
+				"id", e.RequestID, "session", sessionID, "method", e.Method, "reason", reason)
+			p.endInFlight(e, telemetry.StatusAbandoned, reason)
 		}
 	}()
 
@@ -194,7 +235,7 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 		}
 		if strings.HasPrefix(line, "data:") {
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if sid := p.handleSSEData(eventType, data); sid != "" {
+			if sid := p.handleSSEData(eventType, data, sessionID); sid != "" {
 				sessionID = sid
 			}
 		}
@@ -205,9 +246,10 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSSEData processes a data payload from the SSE stream.
-// It returns the session id if this payload registered a session endpoint.
-func (p *Proxy) handleSSEData(eventType, data string) string {
+// handleSSEData processes a data payload from the SSE stream. sessionID is the
+// session this stream belongs to, learned from the endpoint event that precedes
+// every message. It returns the session id if this payload registered one.
+func (p *Proxy) handleSSEData(eventType, data, sessionID string) string {
 	switch eventType {
 	case "endpoint":
 		// The MCP server sends the POST endpoint URL in this event. Only
@@ -215,11 +257,16 @@ func (p *Proxy) handleSSEData(eventType, data string) string {
 		// nothing to key on, and POSTs fall back to path reconstruction.
 		sid := sessionIDOf(data)
 		if sid == "" {
-			p.logger.Debug("post endpoint has no session_id, using path fallback", "url", data)
+			p.logger.Debug("post endpoint has no session id, using path fallback", "url", data)
 			return ""
 		}
 		p.sessionsMu.Lock()
-		p.sessions[sid] = data
+		s, ok := p.sessions[sid]
+		if !ok {
+			s = &session{}
+			p.sessions[sid] = s
+		}
+		s.endpoint = data
 		p.sessionsMu.Unlock()
 		p.logger.Debug("discovered post endpoint", "url", data, "session_id", sid)
 		return sid
@@ -234,15 +281,26 @@ func (p *Proxy) handleSSEData(eventType, data string) string {
 		if id == "" {
 			return ""
 		}
-		inflight := p.reqMap.Take(id)
+		inflight := p.reqMap.Take(sessionID, id)
 		if inflight == nil {
 			return ""
 		}
 
 		durationMS := float64(time.Since(inflight.StartTime).Microseconds()) / 1000.0
-		isErr, errMsg := IsError(resp)
-		telemetry.EndSpan(inflight.Span, durationMS, isErr, errMsg, inflight.ToolName)
-		p.logger.Debug("span ended", "id", id, "method", inflight.Method, "duration_ms", durationMS, "error", isErr)
+		isErr, errMsg, errCode := IsError(resp)
+		status := telemetry.StatusOK
+		if isErr {
+			status = telemetry.StatusError
+		}
+		telemetry.EndSpan(inflight.Span, telemetry.EndAttrs{
+			DurationMS:   durationMS,
+			Status:       status,
+			ErrMsg:       errMsg,
+			ErrCode:      errCode,
+			ToolName:     inflight.ToolName,
+			ResponseSize: len(data),
+		})
+		p.logger.Debug("span ended", "id", id, "session", sessionID, "method", inflight.Method, "duration_ms", durationMS, "error", isErr)
 	}
 	return ""
 }
@@ -259,39 +317,66 @@ func (p *Proxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	// Continue the caller's trace if it sent one; otherwise this becomes a root.
 	spanCtx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 
+	sessionID := sessionIDOf(r.URL.String())
+
 	var spanStarted bool
 	rpcReq, err := ParseRequest(body)
+	if err != nil {
+		// Not JSON-RPC we can read. Forwarded verbatim, but worth a log line:
+		// a malformed request produces no span at all, so without this the
+		// call is invisible in both the trace and the proxy.
+		p.logger.Warn("unparseable JSON-RPC request, forwarding untraced",
+			"session", sessionID, "bytes", len(body), "err", err)
+	}
+	if err == nil {
+		// clientInfo is announced once, in initialize, and is the only thing
+		// that names the client — record it even when initialize itself is not
+		// traced, so later spans on this session can carry it.
+		if rpcReq.Method == "initialize" && sessionID != "" {
+			p.rememberClient(sessionID, ParseClientInfo(rpcReq.Params))
+		}
+	}
 	if err == nil && p.filter.ShouldTrace(rpcReq.Method) {
 		id := IDString(rpcReq.ID)
 		if id != "" {
-			toolName := ""
-			if rpcReq.Method == "tools/call" {
-				toolName = ToolCallParams(rpcReq.Params)
-			}
-			ctx, span := telemetry.StartSpan(spanCtx, p.tracer, telemetry.SpanAttrs{
+			attrs := telemetry.SpanAttrs{
 				Method:    rpcReq.Method,
-				ToolName:  toolName,
 				RequestID: id,
+				SessionID: sessionID,
 				Target:    p.target.String(),
-			})
+			}
+			if rpcReq.Method == "tools/call" {
+				attrs.ToolName = ToolCallParams(rpcReq.Params)
+				attrs.ArgKeys = ToolCallArgKeys(rpcReq.Params)
+				if p.CaptureArgs {
+					attrs.ArgsJSON = ToolCallArgsJSON(rpcReq.Params, maxArgsLen)
+				}
+			}
+			attrs.ClientName, attrs.ClientVer = p.clientOf(sessionID)
+
+			ctx, span := telemetry.StartSpan(spanCtx, p.tracer, attrs)
 			spanCtx = ctx
-			p.reqMap.Store(id, &InFlightRequest{
+			p.reqMap.Store(sessionID, id, &InFlightRequest{
 				Span:      span,
 				Method:    rpcReq.Method,
-				ToolName:  toolName,
+				ToolName:  attrs.ToolName,
+				RequestID: id,
+				SessionID: sessionID,
 				StartTime: time.Now(),
 			})
 			spanStarted = true
-			p.logger.Debug("span started", "id", id, "method", rpcReq.Method, "tool", toolName)
+			p.logger.Debug("span started", "id", id, "session", sessionID, "method", rpcReq.Method, "tool", attrs.ToolName)
 		}
 	}
 
 	// Determine upstream POST URL from this request's own session, never a
 	// shared field — concurrent clients must not cross-route.
 	var postEndpoint string
-	if sid := sessionIDOf(r.URL.String()); sid != "" {
+	if sessionID != "" {
 		p.sessionsMu.RLock()
-		postEndpoint = p.sessions[sid]
+		if s := p.sessions[sessionID]; s != nil {
+			postEndpoint = s.endpoint
+		}
 		p.sessionsMu.RUnlock()
 	}
 
@@ -319,7 +404,7 @@ func (p *Proxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		if spanStarted {
-			p.cleanupSpan(rpcReq, "upstream request creation failed")
+			p.cleanupSpan(sessionID, rpcReq, "upstream request creation failed")
 		}
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
@@ -333,12 +418,20 @@ func (p *Proxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		p.logger.Error("upstream POST failed", "err", err)
 		if spanStarted {
-			p.cleanupSpan(rpcReq, err.Error())
+			p.cleanupSpan(sessionID, rpcReq, err.Error())
 		}
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+
+	// A rejected POST never produces a response on the SSE stream, so its span
+	// would otherwise hang until the eviction deadline and report the deadline
+	// as the call's duration. The rejection is knowable right here.
+	if spanStarted && resp.StatusCode >= 400 {
+		p.cleanupSpan(sessionID, rpcReq,
+			fmt.Sprintf("upstream rejected the request with HTTP %d", resp.StatusCode))
+	}
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -349,16 +442,54 @@ func (p *Proxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func (p *Proxy) cleanupSpan(req *RPCRequest, errMsg string) {
+func (p *Proxy) cleanupSpan(sessionID string, req *RPCRequest, errMsg string) {
 	if req == nil {
 		return
 	}
-	id := IDString(req.ID)
-	inflight := p.reqMap.Take(id)
+	inflight := p.reqMap.Take(sessionID, IDString(req.ID))
 	if inflight == nil {
 		return
 	}
-	telemetry.EndSpan(inflight.Span, 0, true, errMsg, inflight.ToolName)
+	p.endInFlight(inflight, telemetry.StatusError, errMsg)
+}
+
+// endInFlight closes a span that never got a response, with the real elapsed
+// time rather than whatever deadline noticed it.
+func (p *Proxy) endInFlight(e *InFlightRequest, status, errMsg string) {
+	telemetry.EndSpan(e.Span, telemetry.EndAttrs{
+		DurationMS: float64(time.Since(e.StartTime).Microseconds()) / 1000.0,
+		Status:     status,
+		ErrMsg:     errMsg,
+		ToolName:   e.ToolName,
+	})
+}
+
+// rememberClient records the client identity announced for a session.
+func (p *Proxy) rememberClient(sessionID string, info ClientInfo) {
+	if info.Name == "" {
+		return
+	}
+	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	s, ok := p.sessions[sessionID]
+	if !ok {
+		s = &session{}
+		p.sessions[sessionID] = s
+	}
+	s.clientName, s.clientVer = info.Name, info.Version
+}
+
+// clientOf returns the client name and version recorded for a session.
+func (p *Proxy) clientOf(sessionID string) (string, string) {
+	if sessionID == "" {
+		return "", ""
+	}
+	p.sessionsMu.RLock()
+	defer p.sessionsMu.RUnlock()
+	if s := p.sessions[sessionID]; s != nil {
+		return s.clientName, s.clientVer
+	}
+	return "", ""
 }
 
 func (p *Proxy) reverseProxy() *httputil.ReverseProxy {

@@ -15,6 +15,7 @@ type Config struct {
 	LogLevel         string `mapstructure:"log_level"`
 	TraceAll         bool   `mapstructure:"trace_all"`
 	IncludeLifecycle bool   `mapstructure:"include_lifecycle"`
+	CaptureToolArgs  bool   `mapstructure:"capture_tool_args"`
 	ConfigFile       string `mapstructure:"-"`
 
 	OTel OTelConfig `mapstructure:"otel"`
@@ -56,6 +57,7 @@ func BindFlags(cmd *cobra.Command, v *viper.Viper) {
 	cmd.Flags().String("service-name", defaults.OTel.ServiceName, "OTel service.name attribute")
 	cmd.Flags().Bool("trace-all", false, "Trace all JSON-RPC methods, not just tools/call")
 	cmd.Flags().Bool("include-lifecycle", false, "Include initialize/ping/notifications in traces")
+	cmd.Flags().Bool("capture-tool-args", false, "Record full tool arguments on spans (off by default: arguments are user data and may contain secrets)")
 	cmd.Flags().String("log-level", defaults.LogLevel, "Log level: debug|info|warn|error")
 	cmd.Flags().String("config", "", "Path to .mcp-trace.yaml config file")
 
@@ -68,6 +70,7 @@ func BindFlags(cmd *cobra.Command, v *viper.Viper) {
 	_ = v.BindPFlag("otel.service_name", cmd.Flags().Lookup("service-name"))
 	_ = v.BindPFlag("trace_all", cmd.Flags().Lookup("trace-all"))
 	_ = v.BindPFlag("include_lifecycle", cmd.Flags().Lookup("include-lifecycle"))
+	_ = v.BindPFlag("capture_tool_args", cmd.Flags().Lookup("capture-tool-args"))
 	_ = v.BindPFlag("log_level", cmd.Flags().Lookup("log-level"))
 }
 

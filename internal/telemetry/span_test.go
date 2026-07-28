@@ -73,28 +73,28 @@ func TestStartSpan_NonTool(t *testing.T) {
 func TestEndSpan_OK_Tool(t *testing.T) {
 	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
 	// Must not panic; noop span discards attributes silently.
-	EndSpan(span, 12.5, false, "", "read_file")
+	EndSpan(span, EndAttrs{DurationMS: 12.5, Status: StatusOK, ToolName: "read_file"})
 }
 
 func TestEndSpan_OK_NonTool(t *testing.T) {
 	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
-	EndSpan(span, 3.0, false, "", "")
+	EndSpan(span, EndAttrs{DurationMS: 3.0, Status: StatusOK})
 }
 
 func TestEndSpan_Error_Tool(t *testing.T) {
 	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
-	EndSpan(span, 5.0, true, "upstream error", "read_file")
+	EndSpan(span, EndAttrs{DurationMS: 5.0, Status: StatusError, ErrMsg: "upstream error", ToolName: "read_file"})
 }
 
 func TestEndSpan_Error_NonTool(t *testing.T) {
 	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
-	EndSpan(span, 0, true, "upstream error", "")
+	EndSpan(span, EndAttrs{Status: StatusError, ErrMsg: "upstream error"})
 }
 
-// TestEndSpanTimeout_MatchesDocumentedSchema pins the README's claim that
+// TestTimeoutSpan_MatchesDocumentedSchema pins the README's claim that
 // mcp.duration_ms is present on *all* spans — timeout spans used to omit it
 // (and mcp.tool.duration_ms) entirely.
-func TestEndSpanTimeout_MatchesDocumentedSchema(t *testing.T) {
+func TestTimeoutSpan_MatchesDocumentedSchema(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		toolName string
@@ -108,7 +108,12 @@ func TestEndSpanTimeout_MatchesDocumentedSchema(t *testing.T) {
 			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 			_, span := tp.Tracer("test").Start(context.Background(), "test")
 
-			EndSpanTimeout(span, 42.5, tc.toolName)
+			EndSpan(span, EndAttrs{
+				DurationMS: 42.5,
+				Status:     StatusTimeout,
+				ErrMsg:     "no response received within the span deadline",
+				ToolName:   tc.toolName,
+			})
 
 			stubs := exp.GetSpans()
 			if len(stubs) != 1 {
