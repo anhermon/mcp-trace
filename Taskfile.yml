@@ -83,12 +83,16 @@ tasks:
       - echo "Built {{.DIST_DIR}}:"
       - ls -lh {{.DIST_DIR}}/
 
-  smoke:
-    desc: Start Jaeger via Docker Compose and print the UI URL
+  demo:
+    desc: Start the full demo bundle (proxy + collector + Jaeger + fake MCP traffic)
     cmds:
-      - docker compose -f docker/compose.jaeger.yml up -d
-      - echo "Jaeger UI → http://localhost:16686"
-      - 'echo "Run mcp-trace with: task run -- --target http://localhost:8000/sse"'
+      - docker compose up -d --build
+      - echo "Jaeger UI → http://localhost:16686 (service:mcp-trace)"
+
+  demo:down:
+    desc: Stop the demo bundle
+    cmds:
+      - docker compose down
 
   clean:
     desc: Remove build artifacts

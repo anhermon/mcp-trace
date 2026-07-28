@@ -1,0 +1,56 @@
+# mcp-trace demo bundle: `docker compose up` and open http://localhost:16686.
+#
+#   demo-client → mcp-trace → demo-server        (MCP HTTP+SSE traffic)
+#                     ↓
+#              otel-collector → jaeger           (spans)
+#
+# demo-server and demo-client exist only to generate traffic. To trace your own
+# MCP server instead, drop them and point --target at it (see README).
+
+services:
+  # A minimal MCP HTTP+SSE server with a few fake tools.
+  demo-server:
+    build:
+      context: .
+      target: demo
+    command: ["-mode", "server", "-addr", ":8000"]
+
+  # The product: transparent proxy that turns tool calls into OTel spans.
+  mcp-trace:
+    build:
+      context: .
+      target: runtime
+    command:
+      - "--target=http://demo-server:8000/sse"
+      - "--port=8001"
+      - "--otel-endpoint=otel-collector:4317"
+      - "--log-level=debug"
+    ports:
+      - "8001:8001"
+    depends_on: [demo-server, otel-collector]
+
+  # Fires a tools/call through the proxy every few seconds.
+  demo-client:
+    build:
+      context: .
+      target: demo
+    command: ["-mode", "client", "-proxy", "http://mcp-trace:8001", "-every", "3s"]
+    depends_on: [mcp-trace]
+    # depends_on waits for container start, not readiness: on a cold machine the
+    # first SSE connect can get a 502 from the proxy before demo-server is up.
+    # Restarting is cheaper than teaching the demo client to retry non-2xx.
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.115.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./docker/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    depends_on: [jaeger]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"  # Jaeger UI
