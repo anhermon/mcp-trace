@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -17,8 +18,52 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Version is set at build time via -ldflags.
+// Version is set at build time via -ldflags. Binaries built by `go install`
+// get no ldflags, so version() falls back to the module metadata the toolchain
+// stamps into every binary.
 var Version = "dev"
+
+// version reports the build version, preferring the ldflags value and falling
+// back to Go module build info.
+//
+// `go install module/cmd/x@v1.0.1` records the resolved version in
+// Main.Version; `go install ./...` from a source tree records "(devel)" and the
+// VCS revision instead, so each case is handled separately rather than printing
+// a bare "dev" for both.
+func version() string {
+	info, _ := debug.ReadBuildInfo()
+	return versionFrom(Version, info)
+}
+
+// versionFrom is version() with its inputs injected, so both fallback paths are
+// testable — the real build info of a `go test` binary is neither.
+func versionFrom(ldflags string, info *debug.BuildInfo) string {
+	if ldflags != "dev" || info == nil {
+		return ldflags
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var rev, modified string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if rev == "" {
+		return ldflags
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if modified == "true" {
+		rev += "-dirty"
+	}
+	return "devel-" + rev
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -33,7 +78,7 @@ func run() error {
 	root := &cobra.Command{
 		Use:     "mcp-trace",
 		Short:   "Transparent MCP proxy with OpenTelemetry span emission",
-		Version: Version,
+		Version: version(),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfgFile, _ := cmd.Flags().GetString("config")
 			cfg, err := config.Load(v, cfgFile)
@@ -84,6 +129,7 @@ func serve(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("creating proxy: %w", err)
 	}
+	p.CaptureArgs = cfg.CaptureToolArgs
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
@@ -110,6 +156,7 @@ func serve(cfg config.Config) error {
 		"trace_all", cfg.TraceAll,
 		"include_lifecycle", cfg.IncludeLifecycle,
 		"otel_http", cfg.OTel.HTTP,
+		"capture_tool_args", cfg.CaptureToolArgs,
 	)
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

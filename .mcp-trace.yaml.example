@@ -31,5 +31,10 @@ trace_all: false
 # Include initialize/ping/notifications/* in traces.
 include_lifecycle: false
 
+# Record full tool arguments on spans. Off by default: arguments are user data
+# and routinely carry file paths, search queries and credentials. Argument
+# *names* are always recorded as mcp.tool.argument_keys.
+capture_tool_args: false
+
 # Log level: debug | info | warn | error
 log_level: info
