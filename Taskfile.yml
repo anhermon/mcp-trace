@@ -113,7 +113,7 @@ tasks:
   docker:run:
     desc: Run Docker image (pass flags via CLI_ARGS)
     cmds:
-      - docker run --rm mcp-trace:{{.VERSION}} {{.CLI_ARGS}}
+      - docker run --rm -p 8001:8001 mcp-trace:{{.VERSION}} {{.CLI_ARGS}}
 
   deps:
     desc: Download and verify dependencies

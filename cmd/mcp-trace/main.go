@@ -80,7 +80,7 @@ func serve(cfg config.Config) error {
 		IncludeLifecycle: cfg.IncludeLifecycle,
 	}
 
-	p, err := proxy.New(cfg.Target, filter, provider.Tracer, logger)
+	p, err := proxy.New(ctx, cfg.Target, filter, provider.Tracer, logger)
 	if err != nil {
 		return fmt.Errorf("creating proxy: %w", err)
 	}

@@ -71,20 +71,12 @@ func EndSpan(span trace.Span, durationMS float64, isErr bool, errMsg string, too
 	span.End()
 }
 
-// EndSpanTimeout marks a span as timed-out (treated as error).
+// EndSpanTimeout marks a span as timed-out (treated as error). durationMS is
+// how long the request was in flight before the deadline hit — timeout spans
+// carry mcp.duration_ms like every other span.
 // toolName must be non-empty only for tools/call spans.
-func EndSpanTimeout(span trace.Span, toolName string) {
-	msg := "span timed out — no response received within deadline"
-	span.SetAttributes(
-		attribute.String("mcp.status", "error"),
-		attribute.Bool("error", true),
-		attribute.String("error.message", msg),
-	)
-	if toolName != "" {
-		span.SetAttributes(attribute.String("mcp.tool.status", "error"))
-	}
-	span.SetStatus(codes.Error, msg)
-	span.End()
+func EndSpanTimeout(span trace.Span, durationMS float64, toolName string) {
+	EndSpan(span, durationMS, true, "span timed out — no response received within deadline", toolName)
 }
 
 func spanName(method, toolName string) string {
