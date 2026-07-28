@@ -149,21 +149,24 @@ func TestRegression_StaleSpanEvictedWithoutSSEStream(t *testing.T) {
 			t.Errorf("evicted span missing documented attribute %q", key)
 		}
 	}
-	if got := attrs["mcp.status"].AsString(); got != "error" {
-		t.Errorf("mcp.status = %q, want %q", got, "error")
+	if got := attrs["mcp.status"].AsString(); got != "timeout" {
+		t.Errorf("mcp.status = %q, want %q", got, "timeout")
 	}
 
 	// The map entry must be freed, not just the span ended.
-	if p.reqMap.Take("stale") != nil {
+	if p.reqMap.Take("", "stale") != nil {
 		t.Error("evicted request is still in the request map")
 	}
 }
 
-// TestRegression_CamelCaseSessionIDFallsBackToPathReconstruction covers the
-// untested fallback: sessionIDOf only recognises the literal query key
-// session_id, so a server advertising sessionId registers no session and the
-// POST must still reach upstream via path reconstruction.
-func TestRegression_CamelCaseSessionIDFallsBackToPathReconstruction(t *testing.T) {
+// TestRegression_CamelCaseSessionIDIsRecognised pins the fix for a bug that
+// disabled every session-scoped behaviour against TypeScript-SDK servers: the
+// Python SDK advertises session_id, the TypeScript SDK advertises sessionId,
+// and only the former was recognised. The POST still reached upstream via path
+// reconstruction, so nothing errored — but no session was ever registered, so
+// the span carried no mcp.session.id and its request shared one global,
+// collision-prone correlation key with every other client.
+func TestRegression_CamelCaseSessionIDIsRecognised(t *testing.T) {
 	up := newSessionUpstream()
 	up.queryKey = "sessionId"
 	upSrv := httptest.NewServer(up)
@@ -185,8 +188,6 @@ func TestRegression_CamelCaseSessionIDFallsBackToPathReconstruction(t *testing.T
 	ch := openSSE(t, sseCtx, proxySrv.URL+"/sse?want=aaa")
 	waitFor(t, ch, "/messages/?sessionId=aaa")
 
-	// No session was registered, so the proxy must rebuild the upstream URL from
-	// the incoming path and query.
 	resp, err := http.Post(proxySrv.URL+"/messages/?sessionId=aaa", "application/json",
 		strings.NewReader(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"t"}}`))
 	if err != nil {
@@ -200,7 +201,15 @@ func TestRegression_CamelCaseSessionIDFallsBackToPathReconstruction(t *testing.T
 			t.Errorf("POST landed at %q, want %q", got, "/messages/?sessionId=aaa")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("upstream never received the POST via path reconstruction")
+		t.Fatal("upstream never received the POST")
+	}
+
+	// The session must actually be registered, not merely survive via fallback.
+	p.sessionsMu.RLock()
+	registered := p.sessions["aaa"]
+	p.sessionsMu.RUnlock()
+	if registered == nil || registered.endpoint == "" {
+		t.Fatal("camelCase sessionId was not registered as a session")
 	}
 }
 

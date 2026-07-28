@@ -27,6 +27,22 @@ MCP Client  →  mcp-trace :8001  →  MCP Server :8000
               OTLP :4317  →  Collector  →  Jaeger / Tempo / Honeycomb
 ```
 
+## Does this fit your setup? Read this first
+
+mcp-trace sits on the wire, so the transport decides whether it can help you at
+all. Check this before installing anything:
+
+| Your MCP server speaks | mcp-trace |
+|------------------------|-----------|
+| **HTTP+SSE** (`event: endpoint` handshake, separate GET stream and POST endpoint) | ✅ what it is built for |
+| **Streamable HTTP** (single endpoint, response returned on the POST) | ❌ not supported |
+| **stdio** (local subprocess — how most MCP servers are launched today) | ❌ not supported ([roadmap](#roadmap)) |
+
+Be aware that the official MCP SDKs now mark HTTP+SSE as a legacy transport and
+point new work at Streamable HTTP. Plenty of deployed servers still speak
+HTTP+SSE and mcp-trace traces them faithfully — but if you are standing up a new
+remote server today, check which transport you are on before reaching for this.
+
 ## Try it: the demo bundle
 
 Everything below runs with only Docker installed — proxy, OTel Collector,
@@ -100,6 +116,7 @@ All flags can be set via a `.mcp-trace.yaml` file (see `.mcp-trace.yaml.example`
 | `--service-name` | `mcp-trace` | OTel `service.name` resource attribute |
 | `--trace-all` | `false` | Trace all JSON-RPC methods (not just `tools/call`) |
 | `--include-lifecycle` | `false` | Include `initialize`/`ping`/`notifications/*` |
+| `--capture-tool-args` | `false` | Record full tool arguments on spans (may contain secrets) |
 | `--log-level` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `--config` | | Path to config file |
 
@@ -118,6 +135,7 @@ Every CLI flag can also be set via an environment variable using the `MCP_TRACE_
 | `MCP_TRACE_OTEL_SERVICE_NAME` | `--service-name` | `my-mcp-server` |
 | `MCP_TRACE_TRACE_ALL` | `--trace-all` | `true` |
 | `MCP_TRACE_INCLUDE_LIFECYCLE` | `--include-lifecycle` | `true` |
+| `MCP_TRACE_CAPTURE_TOOL_ARGS` | `--capture-tool-args` | `true` |
 | `MCP_TRACE_LOG_LEVEL` | `--log-level` | `debug` |
 
 > The service-name variable is `MCP_TRACE_OTEL_SERVICE_NAME`, not
@@ -145,12 +163,39 @@ Every traced call produces a span with these attributes:
 | `mcp.request.id` | all spans | JSON-RPC request id |
 | `mcp.server.target` | all spans | Upstream URL |
 | `mcp.duration_ms` | all spans | Wall-clock duration in ms |
-| `mcp.status` | all spans | `ok` or `error` |
+| `mcp.status` | all spans | `ok`, `error`, `timeout`, or `abandoned` |
+| `mcp.session.id` | when the server advertises one | MCP session — groups one client's calls |
+| `mcp.client.name` | when the client sent `initialize` | Client name from `clientInfo` |
+| `mcp.client.version` | when the client sent `initialize` | Client version from `clientInfo` |
 | `mcp.tool.name` | tools/call only | Tool name |
+| `mcp.tool.argument_keys` | tools/call with arguments | Argument names, comma-separated |
+| `mcp.tool.arguments` | tools/call, with `--capture-tool-args` | Full arguments as JSON (truncated at 2 KiB) |
 | `mcp.tool.duration_ms` | tools/call only | Wall-clock duration in ms |
-| `mcp.tool.status` | tools/call only | `ok` or `error` |
-| `error` | error spans | `true` if errored |
-| `error.message` | error spans | Error message |
+| `mcp.tool.status` | tools/call only | Same values as `mcp.status` |
+| `mcp.response.size_bytes` | answered spans | Size of the JSON-RPC response |
+| `mcp.rpc.error_code` | JSON-RPC protocol errors | e.g. `-32602` (invalid params) |
+| `error` | non-ok spans | `true` |
+| `error.message` | non-ok spans | Error message or the reason the call never completed |
+
+### What `mcp.status` tells you
+
+The difference between these is the difference between "look at the tool" and
+"look at the network", so they are not collapsed into one `error` value:
+
+| Status | Meaning | Where to look |
+|--------|---------|---------------|
+| `ok` | The server answered normally | — |
+| `error` | The server answered with a JSON-RPC or tool-level error | The tool. `error.message` and `mcp.rpc.error_code` carry the detail |
+| `abandoned` | The SSE stream closed before the answer arrived | `error.message` says whether the **client** disconnected or the **upstream server** died. Duration is time until the break, not a deadline |
+| `timeout` | No answer within the span deadline while the stream stayed open | The server accepted the call and went quiet |
+
+### Tool arguments
+
+`mcp.tool.argument_keys` (argument *names* only) is recorded by default: it tells
+you which call shape failed without putting file paths, search queries, or
+credentials into your trace backend. Pass `--capture-tool-args` to record the
+values as well — only do that where you control the backend, since tool
+arguments are user data.
 
 Spans are emitted with `SpanKind = client`. If the caller sends a `traceparent`
 header, the span is created as a child of that trace; either way mcp-trace
@@ -182,8 +227,8 @@ Then point the client's SSE URL at the proxy instead of the server:
 }
 ```
 
-mcp-trace speaks the MCP HTTP+SSE transport. stdio servers are not supported yet
-(see Roadmap).
+mcp-trace speaks the MCP HTTP+SSE transport only — see
+[Does this fit your setup?](#does-this-fit-your-setup-read-this-first).
 
 ### Limitation: servers advertising an absolute POST endpoint
 
