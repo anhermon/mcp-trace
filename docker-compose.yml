@@ -36,6 +36,10 @@ services:
       target: demo
     command: ["-mode", "client", "-proxy", "http://mcp-trace:8001", "-every", "3s"]
     depends_on: [mcp-trace]
+    # depends_on waits for container start, not readiness: on a cold machine the
+    # first SSE connect can get a 502 from the proxy before demo-server is up.
+    # Restarting is cheaper than teaching the demo client to retry non-2xx.
+    restart: unless-stopped
 
   otel-collector:
     image: otel/opentelemetry-collector:0.115.0
