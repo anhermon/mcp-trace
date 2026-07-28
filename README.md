@@ -1,53 +1,76 @@
 # mcp-trace
 
-Transparent Go proxy for MCP servers that emits [OpenTelemetry](https://opentelemetry.io/) spans for every JSON-RPC tool call.
+**See what your MCP server is actually doing.** An agent calls a tool, it takes
+four seconds or fails, and all you have is a client that says "using tool". No
+timings, no error text, no history — nothing you can debug or put on a dashboard.
+
+mcp-trace is a transparent proxy you put in front of any MCP server speaking the
+HTTP+SSE transport. Every `tools/call` comes out the other side as an
+[OpenTelemetry](https://opentelemetry.io/) span — tool name, wall-clock
+duration, ok/error, and trace context propagated both ways — in Jaeger, Tempo,
+Honeycomb, or anything else that speaks OTLP. The client does not change; you
+point it at the proxy's port instead of the server's.
+
+![mcp-trace demo](docs/img/demo.gif)
 
 ```
 MCP Client  →  mcp-trace :8001  →  MCP Server :8000
                      ↓
-              OTEL Collector :4317
-              (Jaeger / Tempo / Honeycomb)
+              OTLP :4317  →  Collector  →  Jaeger / Tempo / Honeycomb
 ```
 
-## Quick start
+## Try it: the demo bundle
+
+Everything below runs with only Docker installed — proxy, OTel Collector,
+Jaeger, and a small fake MCP server generating tool calls.
 
 ```bash
-# Run against a local MCP server, export spans to Jaeger
-mcp-trace --target http://localhost:8000/sse --port 8001 --otel-endpoint localhost:4317
+git clone https://github.com/anhermon/mcp-trace
+cd mcp-trace
+docker compose up -d
+open http://localhost:16686   # Jaeger UI → select service "mcp-trace"
 ```
 
-Point your MCP client at `:8001` instead of `:8000`. Zero client changes required.
+Spans appear within a few seconds. `docker compose down` when you are done.
 
-### With Docker Compose (Jaeger all-in-one)
+![Tool-call spans in Jaeger](docs/img/jaeger-search.png)
 
-```bash
-docker compose -f docker/compose.jaeger.yml up -d
-mcp-trace --target http://localhost:8000/sse
-# Open http://localhost:16686 — traces appear after the first tool call.
-```
+Every row is one MCP tool call: name, duration, and a red badge on the failed
+one. The demo traffic comes from `examples/demo` — delete the `demo-server` and
+`demo-client` services from `docker-compose.yml` and point `--target` at your
+own server to trace the real thing.
 
-## Installation
-
-### Pre-built binary
-
-Download from [GitHub Releases](https://github.com/anhermon/mcp-trace/releases).
-
-### Build from source
+## Install
 
 ```bash
 go install github.com/anhermon/mcp-trace/cmd/mcp-trace@latest
 ```
 
-### Docker
+Or download a binary for your platform from
+[Releases](https://github.com/anhermon/mcp-trace/releases).
 
-No image is published. Build one locally:
+Then put it in front of your MCP server:
 
 ```bash
-task docker:build
+mcp-trace --target http://localhost:8000/sse --port 8001 --otel-endpoint localhost:4317
+```
+
+Point your MCP client at `:8001` instead of `:8000`. Zero client changes required.
+
+### Docker
+
+Build the image locally:
+
+```bash
+docker build -t mcp-trace:dev .
 docker run --rm mcp-trace:dev \
   --target http://host.docker.internal:8000/sse \
   --otel-endpoint host.docker.internal:4317
 ```
+
+A published `ghcr.io/anhermon/mcp-trace` image (linux/amd64 + linux/arm64) is
+built and pushed by CI on the next tagged release; until that tag is cut, build
+locally as above.
 
 ## Configuration
 
@@ -125,22 +148,29 @@ Span names follow the pattern:
 - `mcp tools/call read_file` (tool calls)
 - `mcp tools/list` (other methods, with `--trace-all`)
 
-## As a Claude Code plugin
+## Wiring an MCP client through the proxy
+
+Start mcp-trace next to your server:
+
+```bash
+mcp-trace --target http://localhost:8000/sse --port 8001 --otel-endpoint localhost:4317
+```
+
+Then point the client's SSE URL at the proxy instead of the server:
 
 ```json
 {
   "mcpServers": {
     "my-server-traced": {
-      "command": "mcp-trace",
-      "args": [
-        "--target", "http://localhost:8000/sse",
-        "--port", "8001",
-        "--otel-endpoint", "localhost:4317"
-      ]
+      "type": "sse",
+      "url": "http://localhost:8001/sse"
     }
   }
 }
 ```
+
+mcp-trace speaks the MCP HTTP+SSE transport. stdio servers are not supported yet
+(see Roadmap).
 
 ## Development
 
@@ -149,6 +179,7 @@ task build    # build binary to bin/mcp-trace
 task test     # run all tests
 task ci       # full pipeline: vet + test + lint + build
 task release  # cross-compile all platforms to dist/
+task demo     # start the demo bundle (Jaeger UI on :16686)
 ```
 
 ### Pre-commit hooks
