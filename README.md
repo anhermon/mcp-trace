@@ -46,7 +46,9 @@ remote server today, check which transport you are on before reaching for this.
 ## Try it: the demo bundle
 
 Everything below runs with only Docker installed — proxy, OTel Collector,
-Jaeger, and a small fake MCP server generating tool calls.
+Jaeger, and a small fake MCP server generating tool calls. The bundle binds
+host ports `8001` (mcp-trace) and `16686` (Jaeger UI); if either is already in
+use, edit the `ports:` entries in `docker-compose.yml` before starting it.
 
 ```bash
 git clone https://github.com/anhermon/mcp-trace
