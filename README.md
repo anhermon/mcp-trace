@@ -97,9 +97,7 @@ docker run --rm -p 8001:8001 mcp-trace:dev \
 container listens on `:8001` inside its own network namespace and your MCP
 client cannot connect.
 
-A published `ghcr.io/anhermon/mcp-trace` image (linux/amd64 + linux/arm64) is
-built and pushed by CI on the next tagged release; until that tag is cut, build
-locally as above.
+No `ghcr.io` image is published. Build locally as above.
 
 ## Configuration
 
