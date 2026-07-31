@@ -2,12 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [master, dev]
+    branches: [main, dev]
     # Without this the release job below can never run: its
     # `if: startsWith(github.ref, 'refs/tags/v')` guard is false on branch pushes.
     tags: ['v*']
   pull_request:
-    branches: [master, dev]
+    branches: [main, dev]
 
 permissions:
   contents: read
