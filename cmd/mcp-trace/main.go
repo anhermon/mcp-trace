@@ -104,6 +104,16 @@ func run() error {
 		},
 	}
 
+	// Add version subcommand that works like "mcp-trace version"
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("mcp-trace version %s\n", version())
+		},
+	}
+	root.AddCommand(versionCmd)
+
 	config.BindFlags(root, v)
 
 	return root.Execute()

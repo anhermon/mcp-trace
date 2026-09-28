@@ -67,12 +67,24 @@ own server to trace the real thing.
 
 ## Install
 
+Install the latest version:
+
 ```bash
 go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@latest
 ```
 
+Or pin to a specific release (recommended for production):
+
+```bash
+go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.1
+```
+
 Or download a binary for your platform from
 [Releases](https://github.com/anhermon/mcp-trace/releases).
+
+**PATH note:** If you have an older version installed elsewhere (e.g.
+`~/.local/bin`), it may shadow the one in `~/go/bin`. Run `which mcp-trace` and
+`mcp-trace version` to verify you're running the expected binary.
 
 ## Usage
 
