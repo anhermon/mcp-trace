@@ -79,8 +79,22 @@ func run() error {
 		Use:     "mcp-trace",
 		Short:   "Transparent MCP proxy with OpenTelemetry span emission",
 		Version: version(),
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgFile, _ := cmd.Flags().GetString("config")
+
+			// Handle --stdio flag with remaining args
+			useStdio, _ := cmd.Flags().GetBool("stdio")
+			if useStdio {
+				if len(args) == 0 {
+					return fmt.Errorf("--stdio requires a command: mcp-trace --stdio -- <command> [args...]")
+				}
+				v.Set("transport", "stdio")
+				v.Set("stdio.command", args[0])
+				if len(args) > 1 {
+					v.Set("stdio.args", args[1:])
+				}
+			}
+
 			cfg, err := config.Load(v, cfgFile)
 			if err != nil {
 				return err
@@ -125,16 +139,46 @@ func serve(cfg config.Config) error {
 		IncludeLifecycle: cfg.IncludeLifecycle,
 	}
 
-	p, err := proxy.New(ctx, cfg.Target, filter, provider.Tracer, logger)
-	if err != nil {
-		return fmt.Errorf("creating proxy: %w", err)
+	var handler http.Handler
+
+	// Create appropriate proxy based on transport mode
+	switch cfg.Transport {
+	case config.TransportSSE:
+		p, err := proxy.New(ctx, cfg.Target, filter, provider.Tracer, logger)
+		if err != nil {
+			return fmt.Errorf("creating SSE proxy: %w", err)
+		}
+		p.CaptureArgs = cfg.CaptureToolArgs
+		handler = p
+
+	case config.TransportStreamable:
+		p, err := proxy.NewStreamableProxy(ctx, cfg.Target, filter, provider.Tracer, logger)
+		if err != nil {
+			return fmt.Errorf("creating Streamable proxy: %w", err)
+		}
+		p.CaptureArgs = cfg.CaptureToolArgs
+		handler = p
+
+	case config.TransportStdio:
+		p, err := proxy.NewStdioProxy(ctx, cfg.Stdio.Command, cfg.Stdio.Args, filter, provider.Tracer, logger)
+		if err != nil {
+			return fmt.Errorf("creating stdio proxy: %w", err)
+		}
+		p.CaptureArgs = cfg.CaptureToolArgs
+		if err := p.Start(); err != nil {
+			return fmt.Errorf("starting stdio subprocess: %w", err)
+		}
+		defer p.Stop()
+		handler = p
+
+	default:
+		return fmt.Errorf("unsupported transport mode: %s", cfg.Transport)
 	}
-	p.CaptureArgs = cfg.CaptureToolArgs
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           p,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -152,12 +196,20 @@ func serve(cfg config.Config) error {
 
 	logger.Info("mcp-trace listening",
 		"port", cfg.Port,
+		"transport", cfg.Transport,
 		"target", cfg.Target,
 		"trace_all", cfg.TraceAll,
 		"include_lifecycle", cfg.IncludeLifecycle,
 		"otel_http", cfg.OTel.HTTP,
 		"capture_tool_args", cfg.CaptureToolArgs,
 	)
+
+	if cfg.Transport == config.TransportStdio {
+		logger.Info("stdio subprocess",
+			"command", cfg.Stdio.Command,
+			"args", cfg.Stdio.Args,
+		)
+	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server: %w", err)
