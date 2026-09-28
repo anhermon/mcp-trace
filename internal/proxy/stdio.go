@@ -4,10 +4,12 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -173,7 +175,9 @@ func (p *StdioProxy) readResponses() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		p.logger.Error("reading subprocess stdout", "err", err)
+		if !errors.Is(err, os.ErrClosed) {
+			p.logger.Error("reading subprocess stdout", "err", err)
+		}
 		select {
 		case p.responseCh <- &rpcResponse{err: err}:
 		case <-p.ctx.Done():
@@ -303,7 +307,9 @@ func (p *StdioProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Write the JSON-RPC request as a single line
 	if _, err := p.stdin.Write(body); err != nil {
-		p.logger.Error("writing to subprocess stdin", "err", err)
+		if !errors.Is(err, os.ErrClosed) {
+			p.logger.Error("writing to subprocess stdin", "err", err)
+		}
 		if spanStarted {
 			p.cleanupSpan(requestID, "failed to write to subprocess")
 		}
@@ -311,7 +317,9 @@ func (p *StdioProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := p.stdin.Write([]byte("\n")); err != nil {
-		p.logger.Error("writing newline to subprocess stdin", "err", err)
+		if !errors.Is(err, os.ErrClosed) {
+			p.logger.Error("writing newline to subprocess stdin", "err", err)
+		}
 		if spanStarted {
 			p.cleanupSpan(requestID, "failed to write to subprocess")
 		}
