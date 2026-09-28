@@ -2,8 +2,16 @@
 # Copy to .mcp-trace.yaml and edit as needed.
 # All values shown are defaults; omit any you don't need to change.
 
-# Upstream MCP server URL (required).
+# Transport mode: sse | streamable | stdio
+transport: sse
+
+# Upstream MCP server URL (required for sse and streamable transports).
 target: http://localhost:8000/sse
+
+# For stdio transport, specify the command and arguments:
+# stdio:
+#   command: npx
+#   args: ["-y", "@modelcontextprotocol/server-filesystem", "~/Documents"]
 
 # Local port to listen on.
 port: 8001

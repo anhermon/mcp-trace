@@ -29,19 +29,17 @@ MCP Client  →  mcp-trace :8001  →  MCP Server :8000
 
 ## Does this fit your setup? Read this first
 
-mcp-trace sits on the wire, so the transport decides whether it can help you at
-all. Check this before installing anything:
+mcp-trace supports three MCP transports. Pick the one that matches how your MCP server communicates:
 
-| Your MCP server speaks | mcp-trace |
-|------------------------|-----------|
-| **HTTP+SSE** (`event: endpoint` handshake, separate GET stream and POST endpoint) | ✅ what it is built for |
-| **Streamable HTTP** (single endpoint, response returned on the POST) | ❌ not supported |
-| **stdio** (local subprocess — how most MCP servers are launched today) | ❌ not supported ([roadmap](#roadmap)) |
+| Your MCP server speaks | mcp-trace | Command example |
+|------------------------|-----------|-----------------|
+| **HTTP+SSE** (`event: endpoint` handshake, separate GET stream and POST endpoint) | ✅ fully supported | `mcp-trace --transport sse --target http://localhost:8000/sse` |
+| **Streamable HTTP** (single endpoint, response returned on the POST) | ✅ fully supported | `mcp-trace --transport streamable --target http://localhost:8000` |
+| **stdio** (local subprocess — how most MCP servers are launched today) | ✅ fully supported | `mcp-trace --stdio -- npx -y @modelcontextprotocol/server-filesystem ~/Documents` |
 
 Be aware that the official MCP SDKs now mark HTTP+SSE as a legacy transport and
-point new work at Streamable HTTP. Plenty of deployed servers still speak
-HTTP+SSE and mcp-trace traces them faithfully — but if you are standing up a new
-remote server today, check which transport you are on before reaching for this.
+point new work at Streamable HTTP. mcp-trace supports both, along with stdio for
+local MCP servers.
 
 ## Try it: the demo bundle
 
@@ -76,13 +74,48 @@ go install github.com/anhermon/mcp-trace/cmd/mcp-trace@latest
 Or download a binary for your platform from
 [Releases](https://github.com/anhermon/mcp-trace/releases).
 
-Then put it in front of your MCP server:
+## Usage
+
+### HTTP+SSE transport (legacy)
+
+Put mcp-trace in front of your HTTP+SSE MCP server:
 
 ```bash
-mcp-trace --target http://localhost:8000/sse --port 8001 --otel-endpoint localhost:4317
+mcp-trace --transport sse --target http://localhost:8000/sse --port 8001 --otel-endpoint localhost:4317
 ```
 
 Point your MCP client at `:8001` instead of `:8000`. Zero client changes required.
+
+### Streamable HTTP transport
+
+For modern MCP servers using Streamable HTTP:
+
+```bash
+mcp-trace --transport streamable --target http://localhost:8000 --port 8001 --otel-endpoint localhost:4317
+```
+
+Point your client at `:8001` and tool calls will be traced transparently.
+
+### stdio transport (local servers)
+
+Wrap a local MCP server subprocess:
+
+```bash
+mcp-trace --stdio -- npx -y @modelcontextprotocol/server-filesystem ~/Documents
+```
+
+This starts the MCP server as a subprocess and proxies JSON-RPC over stdio. Your client
+connects to `http://localhost:8001` (or `--port` if you set it), and mcp-trace
+forwards each JSON-RPC request to the subprocess's stdin, reads responses from stdout,
+and emits OTel spans.
+
+**Another example** with a Python MCP server:
+
+```bash
+mcp-trace --stdio -- python3 -m my_mcp_server --some-flag
+```
+
+The `--` separator is required: everything after it becomes the subprocess command.
 
 ### Docker
 
@@ -107,7 +140,9 @@ All flags can be set via a `.mcp-trace.yaml` file (see `.mcp-trace.yaml.example`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--target` | *(required)* | Upstream MCP server SSE URL |
+| `--transport` | `sse` | Transport mode: `sse`, `streamable`, or `stdio` |
+| `--target` | *(required for sse/streamable)* | Upstream MCP server URL |
+| `--stdio` | `false` | Use stdio transport (shorthand for `--transport stdio`); remaining args after `--` become the command |
 | `--port` | `8001` | Local port to listen on |
 | `--otel-endpoint` | `localhost:4317` | OTLP gRPC endpoint |
 | `--otel-http` | `false` | Use HTTP OTLP exporter instead of gRPC |
@@ -126,6 +161,7 @@ Every CLI flag can also be set via an environment variable using the `MCP_TRACE_
 
 | Environment variable | Equivalent flag | Example |
 |----------------------|-----------------|---------|
+| `MCP_TRACE_TRANSPORT` | `--transport` | `streamable` |
 | `MCP_TRACE_TARGET` | `--target` | `http://localhost:8000/sse` |
 | `MCP_TRACE_PORT` | `--port` | `8001` |
 | `MCP_TRACE_OTEL_ENDPOINT` | `--otel-endpoint` | `localhost:4317` |
@@ -208,10 +244,12 @@ Span names follow the pattern:
 
 ## Wiring an MCP client through the proxy
 
+### HTTP+SSE transport
+
 Start mcp-trace next to your server:
 
 ```bash
-mcp-trace --target http://localhost:8000/sse --port 8001 --otel-endpoint localhost:4317
+mcp-trace --transport sse --target http://localhost:8000/sse --port 8001 --otel-endpoint localhost:4317
 ```
 
 Then point the client's SSE URL at the proxy instead of the server:
@@ -227,8 +265,50 @@ Then point the client's SSE URL at the proxy instead of the server:
 }
 ```
 
-mcp-trace speaks the MCP HTTP+SSE transport only — see
-[Does this fit your setup?](#does-this-fit-your-setup-read-this-first).
+### Streamable HTTP transport
+
+Start mcp-trace pointing at your Streamable HTTP server:
+
+```bash
+mcp-trace --transport streamable --target http://localhost:8000 --port 8001 --otel-endpoint localhost:4317
+```
+
+Point your client at the proxy:
+
+```json
+{
+  "mcpServers": {
+    "my-server-traced": {
+      "type": "http",
+      "url": "http://localhost:8001"
+    }
+  }
+}
+```
+
+### stdio transport
+
+Start mcp-trace with the MCP server command:
+
+```bash
+mcp-trace --stdio -- npx -y @modelcontextprotocol/server-filesystem ~/Documents
+```
+
+Your client connects to `http://localhost:8001`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem-traced": {
+      "type": "http",
+      "url": "http://localhost:8001"
+    }
+  }
+}
+```
+
+mcp-trace wraps the subprocess and forwards JSON-RPC over stdio, emitting the same
+OTel spans as the HTTP transports.
 
 ### Limitation: servers advertising an absolute POST endpoint
 
@@ -274,8 +354,8 @@ Hooks are stored in `scripts/hooks/` and copied into `.git/hooks/`. Bypass in em
 
 ## Roadmap
 
-- **v1.0** — SSE proxy with OTLP spans (this release)
-- **v2.0** — stdio transport support (`mcp-trace --stdio -- <command>`)
+- **v1.0** — SSE proxy with OTLP spans ✅
+- **v2.0** — Streamable HTTP and stdio transport support ✅
 - **v2.x** — Metrics (counters, histograms), sampling
 
 ## License
