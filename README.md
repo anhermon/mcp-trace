@@ -67,12 +67,24 @@ own server to trace the real thing.
 
 ## Install
 
+Install the latest version:
+
 ```bash
 go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@latest
 ```
 
+Or pin to a specific release (recommended for production):
+
+```bash
+go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.1
+```
+
 Or download a binary for your platform from
 [Releases](https://github.com/anhermon/mcp-trace/releases).
+
+**PATH note:** If you have an older version installed elsewhere (e.g.
+`~/.local/bin`), it may shadow the one in `~/go/bin`. Run `which mcp-trace` and
+`mcp-trace version` to verify you're running the expected binary.
 
 ## Usage
 
@@ -148,12 +160,59 @@ All flags can be set via a `.mcp-trace.yaml` file (see `.mcp-trace.yaml.example`
 | `--otel-http` | `false` | Use HTTP OTLP exporter instead of gRPC |
 | `--otel-http-endpoint` | `http://localhost:4318` | OTLP HTTP endpoint |
 | `--otel-insecure` | `true` | Disable TLS for OTLP |
+| `--otel-stdout` | `false` | Print spans to stdout (for testing without a collector) |
 | `--service-name` | `mcp-trace` | OTel `service.name` resource attribute |
 | `--trace-all` | `false` | Trace all JSON-RPC methods (not just `tools/call`) |
 | `--include-lifecycle` | `false` | Include `initialize`/`ping`/`notifications/*` |
 | `--capture-tool-args` | `false` | Record full tool arguments on spans (may contain secrets) |
 | `--log-level` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `--config` | | Path to config file |
+
+## Testing without a collector
+
+If you want to see spans without running a full OTLP collector stack:
+
+```bash
+mcp-trace --stdio --otel-stdout -- npx -y @modelcontextprotocol/server-filesystem ~/Documents
+```
+
+Spans are printed to stdout in a human-readable format. Useful for quick testing,
+CI pipelines, or debugging trace instrumentation.
+
+**Collector warning:** Without `--otel-stdout`, mcp-trace tries to send spans to an
+OTLP collector at `localhost:4317` (gRPC) or the `--otel-endpoint` you specify. If
+no collector is running, **spans are lost silently** after a ~15 second connection
+timeout. mcp-trace logs a warning at startup, but tool calls still succeed — making
+it easy to believe tracing works when it doesn't. Always verify your collector is
+reachable, or use `--otel-stdout` for local testing.
+
+### Running a minimal OTLP collector
+
+If you don't want the full Docker Compose stack, you can run just the OTel Collector:
+
+```bash
+# Using Docker
+docker run -p 4317:4317 -p 4318:4318 \
+  otel/opentelemetry-collector:latest \
+  --config <(echo '
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+exporters:
+  debug:
+    verbosity: detailed
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+')
+```
+
+This prints spans to the collector's stdout. Replace the `debug` exporter with
+`otlp/jaeger`, `otlp/tempo`, or another backend for production use.
 
 ## Environment variables
 
@@ -168,6 +227,7 @@ Every CLI flag can also be set via an environment variable using the `MCP_TRACE_
 | `MCP_TRACE_OTEL_HTTP` | `--otel-http` | `true` |
 | `MCP_TRACE_OTEL_HTTP_ENDPOINT` | `--otel-http-endpoint` | `http://localhost:4318` |
 | `MCP_TRACE_OTEL_INSECURE` | `--otel-insecure` | `true` |
+| `MCP_TRACE_OTEL_STDOUT` | `--otel-stdout` | `true` |
 | `MCP_TRACE_OTEL_SERVICE_NAME` | `--service-name` | `my-mcp-server` |
 | `MCP_TRACE_TRACE_ALL` | `--trace-all` | `true` |
 | `MCP_TRACE_INCLUDE_LIFECYCLE` | `--include-lifecycle` | `true` |

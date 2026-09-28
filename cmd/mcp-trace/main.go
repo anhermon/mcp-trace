@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
@@ -103,6 +104,16 @@ func run() error {
 		},
 	}
 
+	// Add version subcommand that works like "mcp-trace version"
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("mcp-trace version %s\n", version())
+		},
+	}
+	root.AddCommand(versionCmd)
+
 	config.BindFlags(root, v)
 
 	return root.Execute()
@@ -121,6 +132,7 @@ func serve(cfg config.Config) error {
 		HTTPEndpoint: cfg.OTel.HTTPEndpoint,
 		Insecure:     cfg.OTel.Insecure,
 		ServiceName:  cfg.OTel.ServiceName,
+		UseStdout:    cfg.OTel.Stdout,
 		Logger:       logger,
 	})
 	if err != nil {
@@ -140,6 +152,8 @@ func serve(cfg config.Config) error {
 	}
 
 	var handler http.Handler
+	var subprocessErrMu sync.Mutex
+	var subprocessErr error
 
 	// Create appropriate proxy based on transport mode
 	switch cfg.Transport {
@@ -173,6 +187,21 @@ func serve(cfg config.Config) error {
 				logger.Error("stdio proxy shutdown error", "err", err)
 			}
 		}()
+
+		// Monitor subprocess and shut down if it exits unexpectedly
+		go func() {
+			err := <-p.ExitErr()
+			if err != nil {
+				logger.Error("subprocess died, shutting down proxy", "err", err)
+				subprocessErrMu.Lock()
+				if subprocessErr == nil {
+					subprocessErr = err
+				}
+				subprocessErrMu.Unlock()
+				cancel()
+			}
+		}()
+
 		handler = p
 
 	default:
@@ -190,9 +219,13 @@ func serve(cfg config.Config) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-quit
-		logger.Info("shutting down")
-		cancel()
+		select {
+		case <-quit:
+			logger.Info("shutting down")
+			cancel()
+		case <-ctx.Done():
+			// Context cancelled (e.g. subprocess died)
+		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		_ = srv.Shutdown(shutdownCtx)
@@ -215,8 +248,19 @@ func serve(cfg config.Config) error {
 		)
 	}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("server: %w", err)
+	serveErr := srv.ListenAndServe()
+
+	// Check if subprocess died (for stdio transport)
+	subprocessErrMu.Lock()
+	savedSubprocessErr := subprocessErr
+	subprocessErrMu.Unlock()
+
+	if savedSubprocessErr != nil {
+		return fmt.Errorf("subprocess died: %w", savedSubprocessErr)
+	}
+
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		return fmt.Errorf("server: %w", serveErr)
 	}
 	return nil
 }
