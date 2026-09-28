@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anhermon/mcp-trace/internal/telemetry"
+	"github.com/anhermon/mcp-trace/v2/internal/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
