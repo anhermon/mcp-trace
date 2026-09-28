@@ -34,8 +34,10 @@ type StdioProxy struct {
 	responseCh  chan *rpcResponse
 	mu          sync.Mutex
 	running     bool
+	stopped     bool // tracks if Stop() was called
 	ctx         context.Context
 	cancel      context.CancelFunc
+	waitDone    chan struct{} // closed when cmd.Wait() completes
 }
 
 type rpcResponse struct {
@@ -79,6 +81,7 @@ func NewStdioProxy(ctx context.Context, command string, args []string, filter *F
 		responseCh: make(chan *rpcResponse, 16),
 		ctx:        proxyCtx,
 		cancel:     cancel,
+		waitDone:   make(chan struct{}),
 	}
 
 	return p, nil
@@ -115,34 +118,32 @@ func (p *StdioProxy) Start() error {
 // Stop terminates the subprocess.
 func (p *StdioProxy) Stop() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if !p.running {
+		p.mu.Unlock()
 		return nil
 	}
+	if p.stopped {
+		p.mu.Unlock()
+		return nil
+	}
+	p.stopped = true
+	p.mu.Unlock()
 
 	p.cancel()
-	p.running = false
 
 	// Close stdin to signal subprocess to exit
 	p.stdin.Close()
 
 	// Wait for subprocess to exit (with timeout)
-	done := make(chan error, 1)
-	go func() {
-		done <- p.cmd.Wait()
-	}()
-
 	select {
-	case err := <-done:
-		if err != nil {
-			p.logger.Debug("subprocess exited with error", "err", err)
-		}
+	case <-p.waitDone:
+		// Process exited cleanly
 	case <-time.After(5 * time.Second):
 		p.logger.Warn("subprocess did not exit cleanly, killing")
 		if err := p.cmd.Process.Kill(); err != nil {
 			p.logger.Error("failed to kill subprocess", "err", err)
 		}
+		<-p.waitDone // wait for the wait to complete after kill
 	}
 
 	return nil
@@ -189,11 +190,14 @@ func (p *StdioProxy) forwardStderr() {
 
 func (p *StdioProxy) monitorProcess() {
 	err := p.cmd.Wait()
+	close(p.waitDone)
+
 	p.mu.Lock()
-	running := p.running
+	wasStopped := p.stopped
+	p.running = false
 	p.mu.Unlock()
 
-	if running {
+	if !wasStopped {
 		if err != nil {
 			p.logger.Error("subprocess exited unexpectedly", "err", err)
 		} else {
