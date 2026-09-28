@@ -38,6 +38,7 @@ type StdioProxy struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	waitDone    chan struct{} // closed when cmd.Wait() completes
+	exitErr     chan error    // receives subprocess exit errors
 }
 
 type rpcResponse struct {
@@ -82,6 +83,7 @@ func NewStdioProxy(ctx context.Context, command string, args []string, filter *F
 		ctx:        proxyCtx,
 		cancel:     cancel,
 		waitDone:   make(chan struct{}),
+		exitErr:    make(chan error, 1),
 	}
 
 	return p, nil
@@ -200,10 +202,24 @@ func (p *StdioProxy) monitorProcess() {
 	if !wasStopped {
 		if err != nil {
 			p.logger.Error("subprocess exited unexpectedly", "err", err)
+			select {
+			case p.exitErr <- err:
+			default:
+			}
 		} else {
 			p.logger.Warn("subprocess exited")
+			select {
+			case p.exitErr <- fmt.Errorf("subprocess exited"):
+			default:
+			}
 		}
 	}
+}
+
+// ExitErr returns a channel that receives an error when the subprocess exits unexpectedly.
+// This allows the caller to shut down the proxy when the subprocess dies.
+func (p *StdioProxy) ExitErr() <-chan error {
+	return p.exitErr
 }
 
 func (p *StdioProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -224,6 +240,7 @@ func (p *StdioProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var spanStarted bool
 	var inflight *InFlightRequest
 	var requestID string
+	var isNotification bool
 
 	rpcReq, err := ParseRequest(body)
 	if err != nil {
@@ -233,6 +250,7 @@ func (p *StdioProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if err == nil {
 		requestID = IDString(rpcReq.ID)
+		isNotification = requestID == ""
 
 		// Remember client info from initialize
 		if rpcReq.Method == "initialize" {
@@ -298,6 +316,13 @@ func (p *StdioProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.cleanupSpan(requestID, "failed to write to subprocess")
 		}
 		http.Error(w, "subprocess write failed", http.StatusBadGateway)
+		return
+	}
+
+	// For notifications, return immediately without waiting for a response
+	if isNotification {
+		p.logger.Debug("forwarded notification", "method", rpcReq.Method)
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
