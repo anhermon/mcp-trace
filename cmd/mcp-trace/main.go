@@ -187,7 +187,7 @@ func serve(cfg config.Config) error {
 				logger.Error("stdio proxy shutdown error", "err", err)
 			}
 		}()
-		
+
 		// Monitor subprocess and shut down if it exits unexpectedly
 		go func() {
 			err := <-p.ExitErr()
@@ -201,7 +201,7 @@ func serve(cfg config.Config) error {
 				cancel()
 			}
 		}()
-		
+
 		handler = p
 
 	default:
@@ -249,16 +249,16 @@ func serve(cfg config.Config) error {
 	}
 
 	serveErr := srv.ListenAndServe()
-	
+
 	// Check if subprocess died (for stdio transport)
 	subprocessErrMu.Lock()
 	savedSubprocessErr := subprocessErr
 	subprocessErrMu.Unlock()
-	
+
 	if savedSubprocessErr != nil {
 		return fmt.Errorf("subprocess died: %w", savedSubprocessErr)
 	}
-	
+
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		return fmt.Errorf("server: %w", serveErr)
 	}

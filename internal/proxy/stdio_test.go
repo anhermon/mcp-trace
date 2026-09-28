@@ -191,10 +191,10 @@ for line in sys.stdin:
 
 	// Send a notification (no id field) - should return immediately
 	start := time.Now()
-	resp, err := http.Post(h.proxySrv.URL, "application/json", 
+	resp, err := http.Post(h.proxySrv.URL, "application/json",
 		strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
 	elapsed := time.Since(start)
-	
+
 	if err != nil {
 		t.Fatalf("POST notification failed: %v", err)
 	}
@@ -204,7 +204,7 @@ for line in sys.stdin:
 	if resp.StatusCode != http.StatusAccepted {
 		t.Errorf("notification status = %d, want %d", resp.StatusCode, http.StatusAccepted)
 	}
-	
+
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("notification took %v, expected < 500ms (should not wait for response)", elapsed)
 	}

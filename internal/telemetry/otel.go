@@ -80,7 +80,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		}
 		logger.Info("using gRPC OTLP exporter", "endpoint", cfg.GRPCEndpoint)
 	}
-	
+
 	// Warn about collector connectivity (exporters connect lazily, so we can't truly test here)
 	if !cfg.UseStdout {
 		logger.Warn("OTLP exporter configured but not yet connected - connection will be attempted on first span export. If no collector is running, spans will be lost silently. Consider using --otel-stdout for testing without a collector.")
