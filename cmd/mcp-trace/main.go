@@ -132,6 +132,7 @@ func serve(cfg config.Config) error {
 		HTTPEndpoint: cfg.OTel.HTTPEndpoint,
 		Insecure:     cfg.OTel.Insecure,
 		ServiceName:  cfg.OTel.ServiceName,
+		UseStdout:    cfg.OTel.Stdout,
 		Logger:       logger,
 	})
 	if err != nil {

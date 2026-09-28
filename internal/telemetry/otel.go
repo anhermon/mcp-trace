@@ -40,6 +40,8 @@ type Config struct {
 	ServiceName string
 	// Logger receives asynchronous OTel export errors. Optional; defaults to slog.Default.
 	Logger *slog.Logger
+	// UseStdout enables a simple stdout exporter instead of OTLP (for testing/debugging).
+	UseStdout bool
 }
 
 // New initialises an OTel TracerProvider from cfg.
@@ -59,13 +61,29 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		logger.Error("otel error", "err", err)
 	}))
 
-	if cfg.UseHTTP {
+	if cfg.UseStdout {
+		exp, err = newStdoutExporter()
+		if err != nil {
+			return nil, fmt.Errorf("creating stdout exporter: %w", err)
+		}
+		logger.Info("using stdout span exporter (spans will be printed to stdout)")
+	} else if cfg.UseHTTP {
 		exp, err = newHTTPExporter(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("creating HTTP OTLP exporter: %w", err)
+		}
+		logger.Info("using HTTP OTLP exporter", "endpoint", cfg.HTTPEndpoint)
 	} else {
 		exp, err = newGRPCExporter(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("creating gRPC OTLP exporter: %w", err)
+		}
+		logger.Info("using gRPC OTLP exporter", "endpoint", cfg.GRPCEndpoint)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("creating OTLP exporter: %w", err)
+	
+	// Warn about collector connectivity (exporters connect lazily, so we can't truly test here)
+	if !cfg.UseStdout {
+		logger.Warn("OTLP exporter configured but not yet connected - connection will be attempted on first span export. If no collector is running, spans will be lost silently. Consider using --otel-stdout for testing without a collector.")
 	}
 
 	res, err := resource.New(ctx,
@@ -112,4 +130,38 @@ func newHTTPExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, er
 		opts = append(opts, otlptracehttp.WithInsecure())
 	}
 	return otlptracehttp.New(ctx, opts...)
+}
+
+func newStdoutExporter() (sdktrace.SpanExporter, error) {
+	return &stdoutExporter{}, nil
+}
+
+// stdoutExporter is a simple span exporter that prints spans to stdout as JSON.
+// Useful for testing and debugging without running a collector.
+type stdoutExporter struct{}
+
+func (e *stdoutExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	for _, span := range spans {
+		fmt.Printf("SPAN: %s [%s] duration=%v status=%s\n",
+			span.Name(),
+			span.SpanContext().TraceID().String(),
+			span.EndTime().Sub(span.StartTime()),
+			span.Status().Code,
+		)
+		if len(span.Attributes()) > 0 {
+			fmt.Printf("  Attributes: ")
+			for i, attr := range span.Attributes() {
+				if i > 0 {
+					fmt.Printf(", ")
+				}
+				fmt.Printf("%s=%v", attr.Key, attr.Value.AsInterface())
+			}
+			fmt.Printf("\n")
+		}
+	}
+	return nil
+}
+
+func (e *stdoutExporter) Shutdown(ctx context.Context) error {
+	return nil
 }
