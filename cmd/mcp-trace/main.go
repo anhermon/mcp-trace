@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/anhermon/mcp-trace/internal/config"
-	"github.com/anhermon/mcp-trace/internal/proxy"
-	"github.com/anhermon/mcp-trace/internal/telemetry"
+	"github.com/anhermon/mcp-trace/v2/internal/config"
+	"github.com/anhermon/mcp-trace/v2/internal/proxy"
+	"github.com/anhermon/mcp-trace/v2/internal/telemetry"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
