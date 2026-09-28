@@ -20,22 +20,22 @@ import (
 
 // StdioProxy wraps a local MCP server subprocess and proxies JSON-RPC over stdio.
 type StdioProxy struct {
-	cmd          *exec.Cmd
-	stdin        io.WriteCloser
-	stdout       io.ReadCloser
-	stderr       io.ReadCloser
-	filter       *Filter
-	tracer       trace.Tracer
-	reqMap       *RequestMap
-	logger       *slog.Logger
-	CaptureArgs  bool
-	clientName   string
-	clientVer    string
-	responseCh   chan *rpcResponse
-	mu           sync.Mutex
-	running      bool
-	ctx          context.Context
-	cancel       context.CancelFunc
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	stdout      io.ReadCloser
+	stderr      io.ReadCloser
+	filter      *Filter
+	tracer      trace.Tracer
+	reqMap      *RequestMap
+	logger      *slog.Logger
+	CaptureArgs bool
+	clientName  string
+	clientVer   string
+	responseCh  chan *rpcResponse
+	mu          sync.Mutex
+	running     bool
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 type rpcResponse struct {
@@ -375,7 +375,9 @@ func (p *StdioProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Write response to client
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write(respData.data)
+			if _, err := w.Write(respData.data); err != nil {
+				p.logger.Debug("failed to write response to client", "err", err)
+			}
 			return
 		}
 	}

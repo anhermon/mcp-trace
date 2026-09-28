@@ -2,7 +2,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -20,14 +19,14 @@ import (
 // StreamableProxy handles Streamable HTTP transport, where both request and
 // response happen on a single POST endpoint.
 type StreamableProxy struct {
-	target       string
-	filter       *Filter
-	tracer       trace.Tracer
-	reqMap       *RequestMap
-	logger       *slog.Logger
-	CaptureArgs  bool
-	clientName   string
-	clientVer    string
+	target      string
+	filter      *Filter
+	tracer      trace.Tracer
+	reqMap      *RequestMap
+	logger      *slog.Logger
+	CaptureArgs bool
+	clientName  string
+	clientVer   string
 }
 
 // NewStreamableProxy creates a proxy for Streamable HTTP transport.
@@ -200,62 +199,6 @@ func (p *StreamableProxy) streamAndParseResponse(w http.ResponseWriter, r io.Rea
 		ResponseSize: len(data),
 	})
 	p.logger.Debug("span ended", "id", id, "method", inflight.Method, "duration_ms", durationMS, "error", isErr)
-}
-
-// streamChunkedResponse handles streaming responses that may arrive in chunks.
-// For streamable HTTP, some servers may send multiple newline-delimited JSON-RPC messages.
-func (p *StreamableProxy) streamChunkedResponse(w http.ResponseWriter, r io.Reader, inflight *InFlightRequest) {
-	flusher, canFlush := w.(http.Flusher)
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELine)
-
-	var foundResponse bool
-	for scanner.Scan() {
-		line := scanner.Bytes()
-
-		// Forward to client
-		w.Write(line)
-		w.Write([]byte("\n"))
-		if canFlush {
-			flusher.Flush()
-		}
-
-		// Try to parse as JSON-RPC response
-		if !foundResponse {
-			resp, err := ParseResponse(line)
-			if err == nil && resp.ID != nil {
-				id := IDString(resp.ID)
-				if id == inflight.RequestID {
-					durationMS := float64(time.Since(inflight.StartTime).Microseconds()) / 1000.0
-					isErr, errMsg, errCode := IsError(resp)
-					status := telemetry.StatusOK
-					if isErr {
-						status = telemetry.StatusError
-					}
-
-					telemetry.EndSpan(inflight.Span, telemetry.EndAttrs{
-						DurationMS:   durationMS,
-						Status:       status,
-						ErrMsg:       errMsg,
-						ErrCode:      errCode,
-						ToolName:     inflight.ToolName,
-						ResponseSize: len(line),
-					})
-					p.logger.Debug("span ended", "id", id, "method", inflight.Method, "duration_ms", durationMS, "error", isErr)
-					foundResponse = true
-				}
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		p.logger.Error("streaming response error", "err", err)
-	}
-
-	// If we never found a matching response, end the span as abandoned
-	if !foundResponse {
-		p.endInFlight(inflight, telemetry.StatusAbandoned, "response stream ended without matching JSON-RPC response")
-	}
 }
 
 func (p *StreamableProxy) endInFlight(e *InFlightRequest, status, errMsg string) {

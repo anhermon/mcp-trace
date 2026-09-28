@@ -168,7 +168,11 @@ func serve(cfg config.Config) error {
 		if err := p.Start(); err != nil {
 			return fmt.Errorf("starting stdio subprocess: %w", err)
 		}
-		defer p.Stop()
+		defer func() {
+			if err := p.Stop(); err != nil {
+				logger.Error("stdio proxy shutdown error", "err", err)
+			}
+		}()
 		handler = p
 
 	default:
