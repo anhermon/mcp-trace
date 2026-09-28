@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [master, dev]
+    branches: [main, dev]
+    # Without this the release job below can never run: its
+    # `if: startsWith(github.ref, 'refs/tags/v')` guard is false on branch pushes.
+    tags: ['v*']
   pull_request:
-    branches: [master, dev]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -108,9 +111,10 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          # Pinned: 'latest' silently jumped to v2 and rejected the v1 config.
+          version: v2.12.2
 
   # ── Branch sanity guard ──────────────────────────────────────────────────────
   # Prevents direct merges from feature branches to main (must go through dev).
@@ -159,3 +163,49 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # ── Publish container image to ghcr.io ───────────────────────────────────────
+  # Same tag guard as `release` above, which is known to fire: the v1.0.1 tag
+  # push ran this workflow and the Release job completed (run 30211256568).
+  docker-publish:
+    name: Publish image (ghcr.io)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Explicit: the demo stage must never be published as mcp-trace.
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ github.ref_name }}

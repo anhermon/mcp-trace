@@ -7,18 +7,63 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
-	"github.com/paperclipai/mcp-trace/internal/config"
-	"github.com/paperclipai/mcp-trace/internal/proxy"
-	"github.com/paperclipai/mcp-trace/internal/telemetry"
+	"github.com/anhermon/mcp-trace/internal/config"
+	"github.com/anhermon/mcp-trace/internal/proxy"
+	"github.com/anhermon/mcp-trace/internal/telemetry"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-// Version is set at build time via -ldflags.
+// Version is set at build time via -ldflags. Binaries built by `go install`
+// get no ldflags, so version() falls back to the module metadata the toolchain
+// stamps into every binary.
 var Version = "dev"
+
+// version reports the build version, preferring the ldflags value and falling
+// back to Go module build info.
+//
+// `go install module/cmd/x@v1.0.1` records the resolved version in
+// Main.Version; `go install ./...` from a source tree records "(devel)" and the
+// VCS revision instead, so each case is handled separately rather than printing
+// a bare "dev" for both.
+func version() string {
+	info, _ := debug.ReadBuildInfo()
+	return versionFrom(Version, info)
+}
+
+// versionFrom is version() with its inputs injected, so both fallback paths are
+// testable — the real build info of a `go test` binary is neither.
+func versionFrom(ldflags string, info *debug.BuildInfo) string {
+	if ldflags != "dev" || info == nil {
+		return ldflags
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var rev, modified string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if rev == "" {
+		return ldflags
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if modified == "true" {
+		rev += "-dirty"
+	}
+	return "devel-" + rev
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -29,14 +74,27 @@ func main() {
 
 func run() error {
 	v := viper.New()
-	var cfgFile string
 
 	root := &cobra.Command{
 		Use:     "mcp-trace",
 		Short:   "Transparent MCP proxy with OpenTelemetry span emission",
-		Version: Version,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfgFile, _ = cmd.Flags().GetString("config")
+		Version: version(),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgFile, _ := cmd.Flags().GetString("config")
+
+			// Handle --stdio flag with remaining args
+			useStdio, _ := cmd.Flags().GetBool("stdio")
+			if useStdio {
+				if len(args) == 0 {
+					return fmt.Errorf("--stdio requires a command: mcp-trace --stdio -- <command> [args...]")
+				}
+				v.Set("transport", "stdio")
+				v.Set("stdio.command", args[0])
+				if len(args) > 1 {
+					v.Set("stdio.args", args[1:])
+				}
+			}
+
 			cfg, err := config.Load(v, cfgFile)
 			if err != nil {
 				return err
@@ -46,7 +104,6 @@ func run() error {
 	}
 
 	config.BindFlags(root, v)
-	_ = cfgFile
 
 	return root.Execute()
 }
@@ -64,6 +121,7 @@ func serve(cfg config.Config) error {
 		HTTPEndpoint: cfg.OTel.HTTPEndpoint,
 		Insecure:     cfg.OTel.Insecure,
 		ServiceName:  cfg.OTel.ServiceName,
+		Logger:       logger,
 	})
 	if err != nil {
 		return fmt.Errorf("initialising OTel: %w", err)
@@ -81,15 +139,46 @@ func serve(cfg config.Config) error {
 		IncludeLifecycle: cfg.IncludeLifecycle,
 	}
 
-	p, err := proxy.New(cfg.Target, filter, provider.Tracer, logger)
-	if err != nil {
-		return fmt.Errorf("creating proxy: %w", err)
+	var handler http.Handler
+
+	// Create appropriate proxy based on transport mode
+	switch cfg.Transport {
+	case config.TransportSSE:
+		p, err := proxy.New(ctx, cfg.Target, filter, provider.Tracer, logger)
+		if err != nil {
+			return fmt.Errorf("creating SSE proxy: %w", err)
+		}
+		p.CaptureArgs = cfg.CaptureToolArgs
+		handler = p
+
+	case config.TransportStreamable:
+		p, err := proxy.NewStreamableProxy(ctx, cfg.Target, filter, provider.Tracer, logger)
+		if err != nil {
+			return fmt.Errorf("creating Streamable proxy: %w", err)
+		}
+		p.CaptureArgs = cfg.CaptureToolArgs
+		handler = p
+
+	case config.TransportStdio:
+		p, err := proxy.NewStdioProxy(ctx, cfg.Stdio.Command, cfg.Stdio.Args, filter, provider.Tracer, logger)
+		if err != nil {
+			return fmt.Errorf("creating stdio proxy: %w", err)
+		}
+		p.CaptureArgs = cfg.CaptureToolArgs
+		if err := p.Start(); err != nil {
+			return fmt.Errorf("starting stdio subprocess: %w", err)
+		}
+		defer p.Stop()
+		handler = p
+
+	default:
+		return fmt.Errorf("unsupported transport mode: %s", cfg.Transport)
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           p,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -107,11 +196,20 @@ func serve(cfg config.Config) error {
 
 	logger.Info("mcp-trace listening",
 		"port", cfg.Port,
+		"transport", cfg.Transport,
 		"target", cfg.Target,
 		"trace_all", cfg.TraceAll,
 		"include_lifecycle", cfg.IncludeLifecycle,
 		"otel_http", cfg.OTel.HTTP,
+		"capture_tool_args", cfg.CaptureToolArgs,
 	)
+
+	if cfg.Transport == config.TransportStdio {
+		logger.Info("stdio subprocess",
+			"command", cfg.Stdio.Command,
+			"args", cfg.Stdio.Args,
+		)
+	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server: %w", err)

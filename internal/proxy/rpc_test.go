@@ -44,12 +44,15 @@ func TestIsError_RPCError(t *testing.T) {
 		ID:      json.RawMessage(`1`),
 		Error:   &RPCError{Code: -32600, Message: "Invalid Request"},
 	}
-	isErr, msg := IsError(resp)
+	isErr, msg, code := IsError(resp)
 	if !isErr {
 		t.Error("expected error")
 	}
 	if msg != "Invalid Request" {
 		t.Errorf("got msg %q", msg)
+	}
+	if code != -32600 {
+		t.Errorf("got code %d, want -32600", code)
 	}
 }
 
@@ -59,12 +62,16 @@ func TestIsError_MCPToolError(t *testing.T) {
 		ID:      json.RawMessage(`1`),
 		Result:  json.RawMessage(`{"isError":true,"content":[{"type":"text","text":"file not found"}]}`),
 	}
-	isErr, msg := IsError(resp)
+	isErr, msg, code := IsError(resp)
 	if !isErr {
 		t.Error("expected error")
 	}
 	if msg != "file not found" {
 		t.Errorf("got msg %q", msg)
+	}
+	// Tool-level errors are not JSON-RPC protocol errors; there is no code.
+	if code != 0 {
+		t.Errorf("got code %d, want 0", code)
 	}
 }
 
@@ -74,7 +81,7 @@ func TestIsError_OK(t *testing.T) {
 		ID:      json.RawMessage(`1`),
 		Result:  json.RawMessage(`{"content":[{"type":"text","text":"hello"}]}`),
 	}
-	isErr, _ := IsError(resp)
+	isErr, _, _ := IsError(resp)
 	if isErr {
 		t.Error("expected no error")
 	}

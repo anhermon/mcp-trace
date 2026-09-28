@@ -3,6 +3,8 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // RPCRequest represents an incoming JSON-RPC 2.0 request.
@@ -30,16 +32,55 @@ type RPCError struct {
 // ToolCallParams extracts the tool name from a tools/call params payload.
 // Returns empty string if not parseable.
 func ToolCallParams(raw json.RawMessage) string {
-	if raw == nil {
+	name, _ := toolCall(raw)
+	return name
+}
+
+// ToolCallArgKeys returns the tool's argument names, sorted and comma-joined.
+// Names alone are safe to record by default: they tell you which call shape
+// failed without putting file paths, queries, or credentials in a trace backend.
+func ToolCallArgKeys(raw json.RawMessage) string {
+	_, args := toolCall(raw)
+	if len(args) == 0 {
 		return ""
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+// ToolCallArgsJSON returns the raw tool arguments as JSON, truncated to
+// maxLen bytes. Only for use when the operator has opted in: arguments are
+// user data and routinely carry secrets.
+func ToolCallArgsJSON(raw json.RawMessage, maxLen int) string {
+	var p struct {
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if raw == nil || json.Unmarshal(raw, &p) != nil || len(p.Arguments) == 0 {
+		return ""
+	}
+	s := string(p.Arguments)
+	if len(s) > maxLen {
+		return s[:maxLen] + "…(truncated)"
+	}
+	return s
+}
+
+func toolCall(raw json.RawMessage) (string, map[string]json.RawMessage) {
+	if raw == nil {
+		return "", nil
 	}
 	var p struct {
-		Name string `json:"name"`
+		Name      string                     `json:"name"`
+		Arguments map[string]json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return ""
+		return "", nil
 	}
-	return p.Name
+	return p.Name, p.Arguments
 }
 
 // IDString converts a JSON-RPC id (which may be number, string, or null) to a string key.
@@ -76,11 +117,12 @@ func ParseResponse(data []byte) (*RPCResponse, error) {
 	return &resp, nil
 }
 
-// IsError returns true if the response represents an error condition.
+// IsError reports whether the response represents an error condition, along
+// with the error message and the JSON-RPC error code (0 when there is none).
 // Covers both JSON-RPC protocol errors and MCP tool-level errors (result.isError).
-func IsError(resp *RPCResponse) (bool, string) {
+func IsError(resp *RPCResponse) (bool, string, int) {
 	if resp.Error != nil {
-		return true, resp.Error.Message
+		return true, resp.Error.Message, resp.Error.Code
 	}
 	if resp.Result != nil {
 		var r struct {
@@ -94,8 +136,28 @@ func IsError(resp *RPCResponse) (bool, string) {
 			if len(r.Content) > 0 {
 				msg = r.Content[0].Text
 			}
-			return true, msg
+			return true, msg, 0
 		}
 	}
-	return false, ""
+	return false, "", 0
+}
+
+// ClientInfo is the client identity announced in an initialize request.
+type ClientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// ParseClientInfo extracts clientInfo from an initialize params payload.
+// This is the only place an MCP client names itself, so it is the only way a
+// span can answer "which client made this call".
+func ParseClientInfo(raw json.RawMessage) ClientInfo {
+	var p struct {
+		ClientInfo ClientInfo `json:"clientInfo"`
+	}
+	if raw == nil {
+		return ClientInfo{}
+	}
+	_ = json.Unmarshal(raw, &p)
+	return p.ClientInfo
 }
