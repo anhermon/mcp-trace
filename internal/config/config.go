@@ -47,6 +47,7 @@ type OTelConfig struct {
 	HTTPEndpoint string `mapstructure:"http_endpoint"`
 	Insecure     bool   `mapstructure:"insecure"`
 	ServiceName  string `mapstructure:"service_name"`
+	Stdout       bool   `mapstructure:"stdout"`
 }
 
 // Defaults returns a Config with sensible defaults.
@@ -77,6 +78,7 @@ func BindFlags(cmd *cobra.Command, v *viper.Viper) {
 	cmd.Flags().String("otel-http-endpoint", defaults.OTel.HTTPEndpoint, "OTLP HTTP endpoint")
 	cmd.Flags().Bool("otel-insecure", defaults.OTel.Insecure, "Disable TLS for OTLP connection")
 	cmd.Flags().String("service-name", defaults.OTel.ServiceName, "OTel service.name attribute")
+	cmd.Flags().Bool("otel-stdout", false, "Print spans to stdout instead of sending to OTLP (useful for testing without a collector)")
 	cmd.Flags().Bool("trace-all", false, "Trace all JSON-RPC methods, not just tools/call")
 	cmd.Flags().Bool("include-lifecycle", false, "Include initialize/ping/notifications in traces")
 	cmd.Flags().Bool("capture-tool-args", false, "Record full tool arguments on spans (off by default: arguments are user data and may contain secrets)")
@@ -91,6 +93,7 @@ func BindFlags(cmd *cobra.Command, v *viper.Viper) {
 	_ = v.BindPFlag("otel.http_endpoint", cmd.Flags().Lookup("otel-http-endpoint"))
 	_ = v.BindPFlag("otel.insecure", cmd.Flags().Lookup("otel-insecure"))
 	_ = v.BindPFlag("otel.service_name", cmd.Flags().Lookup("service-name"))
+	_ = v.BindPFlag("otel.stdout", cmd.Flags().Lookup("otel-stdout"))
 	_ = v.BindPFlag("trace_all", cmd.Flags().Lookup("trace-all"))
 	_ = v.BindPFlag("include_lifecycle", cmd.Flags().Lookup("include-lifecycle"))
 	_ = v.BindPFlag("capture_tool_args", cmd.Flags().Lookup("capture-tool-args"))
