@@ -68,7 +68,7 @@ own server to trace the real thing.
 ## Install
 
 ```bash
-go install github.com/anhermon/mcp-trace/cmd/mcp-trace@latest
+go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@latest
 ```
 
 Or download a binary for your platform from

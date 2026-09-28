@@ -1,4 +1,4 @@
-module github.com/anhermon/mcp-trace
+module github.com/anhermon/mcp-trace/v2
 
 go 1.22
 
