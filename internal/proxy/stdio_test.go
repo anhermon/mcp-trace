@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -273,4 +274,80 @@ for line in sys.stdin:
 func lookPath(cmd string) (string, error) {
 	// Simple check using 'which' command
 	return cmd, nil
+}
+
+// TestStdio_ForcedShutdownSuppressesErrClosed verifies that os.ErrClosed
+// errors during shutdown are suppressed and don't pollute logs.
+func TestStdio_ForcedShutdownSuppressesErrClosed(t *testing.T) {
+	// Check if python3 is available
+	if _, err := lookPath("python3"); err != nil {
+		t.Skip("python3 not found, skipping forced shutdown test")
+	}
+
+	// Script that keeps running and responding
+	script := `
+import sys
+import json
+import signal
+
+# Ignore SIGTERM so we can test forced kill
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+        resp = {
+            "jsonrpc": "2.0",
+            "id": req.get("id"),
+            "result": {"result": "ok"}
+        }
+        print(json.dumps(resp), flush=True)
+    except:
+        pass
+`
+
+	// Capture log output to verify ErrClosed is not logged as an error
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	tracer := tp.Tracer("stdio-test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p, err := NewStdioProxy(ctx, "python3", []string{"-u", "-c", script}, &Filter{}, tracer, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+
+	proxySrv := httptest.NewServer(p)
+
+	// Send a request to verify it's working
+	resp, err := http.Post(proxySrv.URL, "application/json",
+		strings.NewReader(`{"jsonrpc":"2.0","id":"1","method":"test"}`))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Now force shutdown - this will close stdin while the subprocess may still be trying to write
+	proxySrv.Close()
+	p.Stop()
+	cancel()
+	_ = tp.Shutdown(context.Background())
+
+	// Give it a moment for any error logging to happen
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that logs don't contain "file already closed" or similar ErrClosed messages
+	// as errors - they should be suppressed during shutdown
+	logOutput := logBuf.String()
+	if strings.Contains(logOutput, "file already closed") && strings.Contains(logOutput, "level=ERROR") {
+		t.Errorf("os.ErrClosed should be suppressed during shutdown, but found error log:\n%s", logOutput)
+	}
 }
