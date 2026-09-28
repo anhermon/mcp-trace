@@ -77,9 +77,11 @@ func run() error {
 	v := viper.New()
 
 	root := &cobra.Command{
-		Use:     "mcp-trace",
-		Short:   "Transparent MCP proxy with OpenTelemetry span emission",
-		Version: version(),
+		Use:           "mcp-trace",
+		Short:         "Transparent MCP proxy with OpenTelemetry span emission",
+		Version:       version(),
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgFile, _ := cmd.Flags().GetString("config")
 

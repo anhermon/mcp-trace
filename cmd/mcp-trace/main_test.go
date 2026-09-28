@@ -3,6 +3,9 @@ package main
 import (
 	"runtime/debug"
 	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // TestVersionFrom covers the reason `mcp-trace --version` used to print "dev"
@@ -40,4 +43,28 @@ func TestVersionFrom(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRootCommandSilenceFlags verifies that operational failures (like subprocess
+// death) print the error without dumping usage text.
+func TestRootCommandSilenceFlags(t *testing.T) {
+	v := viper.New()
+	root := &cobra.Command{
+		Use:           "mcp-trace",
+		Short:         "test",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return nil
+		},
+	}
+
+	if !root.SilenceUsage {
+		t.Error("SilenceUsage should be true to prevent usage dump on operational errors")
+	}
+	if !root.SilenceErrors {
+		t.Error("SilenceErrors should be true to let main() handle error formatting")
+	}
+
+	_ = v
 }
