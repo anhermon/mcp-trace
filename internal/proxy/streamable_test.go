@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,9 @@ import (
 // POST endpoint: receives JSON-RPC and returns the response directly on the POST.
 type fakeStreamableUpstream struct {
 	lastHeader http.Header
+	// sse answers with the Python SDK's default Streamable HTTP body:
+	// Content-Type text/event-stream, not a bare JSON-RPC document.
+	sse bool
 }
 
 func newFakeStreamableUpstream() *fakeStreamableUpstream {
@@ -50,6 +54,19 @@ func (f *fakeStreamableUpstream) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 	resp := RPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
 	data, _ := json.Marshal(resp)
+
+	if f.sse {
+		// Same shape sse-starlette emits for the Python SDK default
+		// (is_json_response_enabled=False): a priming event with empty
+		// data, a notification that is not the tool result, then the
+		// JSON-RPC response as event: message.
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "id: prime\ndata:\n\n")
+		fmt.Fprint(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n")
+		fmt.Fprintf(w, "id: evt-1\nevent: message\ndata: %s\n\n", data)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -236,4 +253,39 @@ func TestStreamable_TraceparentInjected(t *testing.T) {
 	if h.up.lastHeader.Get("traceparent") == "" {
 		t.Error("upstream did not receive traceparent header")
 	}
+}
+
+func TestStreamable_EventStreamToolsCallExportsSpan(t *testing.T) {
+	h := newStreamableTestHarness(t, &Filter{})
+	h.up.sse = true
+
+	body := h.post(t, `{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"my_tool"}}`)
+	if !strings.Contains(body, "event: message") || !strings.Contains(body, `"result":"ok"`) {
+		t.Fatalf("client did not receive the SSE tool result unchanged: %q", body)
+	}
+
+	spans := h.spans()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span for text/event-stream tools/call, got %d", len(spans))
+	}
+	s := spans[0]
+	if s.Name != "mcp tools/call my_tool" {
+		t.Errorf("span name = %q, want %q", s.Name, "mcp tools/call my_tool")
+	}
+	requireAttr(t, s, "mcp.method", "tools/call")
+	requireAttr(t, s, "mcp.tool.name", "my_tool")
+	requireAttr(t, s, "mcp.tool.status", "ok")
+}
+
+func TestStreamable_EventStreamToolErrorSetsErrorStatus(t *testing.T) {
+	h := newStreamableTestHarness(t, &Filter{})
+	h.up.sse = true
+
+	h.post(t, `{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"fail_tool"}}`)
+
+	spans := h.spans()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+	requireAttr(t, spans[0], "mcp.tool.status", "error")
 }
