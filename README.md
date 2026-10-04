@@ -34,8 +34,8 @@ mcp-trace supports three MCP transports. Pick the one that matches how your MCP 
 | Your MCP server speaks | mcp-trace | Command example |
 |------------------------|-----------|-----------------|
 | **HTTP+SSE** (`event: endpoint` handshake, separate GET stream and POST endpoint) | ✅ fully supported | `mcp-trace --transport sse --target http://localhost:8000/sse` |
-| **Streamable HTTP** (single endpoint, response returned on the POST) | ✅ fully supported | `mcp-trace --transport streamable --target http://localhost:8000` |
-| **stdio** (local subprocess — how most MCP servers are launched today) | ✅ fully supported | `mcp-trace --stdio -- npx -y @modelcontextprotocol/server-filesystem ~/Documents` |
+| **Streamable HTTP** (one POST endpoint; JSON or `text/event-stream` on that response) | ✅ fully supported | `mcp-trace --transport streamable --target http://localhost:8000/mcp` |
+| **stdio subprocess, HTTP client** (mcp-trace listens on HTTP and talks stdio to a local server; the client does not get a raw stdio pipe) | ✅ fully supported | `mcp-trace --stdio -- npx -y @modelcontextprotocol/server-filesystem ~/Documents` |
 
 Be aware that the official MCP SDKs now mark HTTP+SSE as a legacy transport and
 point new work at Streamable HTTP. mcp-trace supports both, along with stdio for
@@ -103,23 +103,30 @@ Point your MCP client at `:8001` instead of `:8000`. Zero client changes require
 For modern MCP servers using Streamable HTTP:
 
 ```bash
-mcp-trace --transport streamable --target http://localhost:8000 --port 8001 --otel-endpoint localhost:4317
+mcp-trace --transport streamable --target http://localhost:8000/mcp --port 8001 --otel-endpoint localhost:4317
 ```
 
-Point your client at `:8001` and tool calls will be traced transparently.
+Point your client at `:8001`. `--target` is the exact URL mcp-trace POSTs to;
+the client's path is not appended. The Python MCP SDK and FastMCP mount
+Streamable HTTP at `/mcp` by default, so `--target http://localhost:8000`
+(the origin, no path) is a POST to `/` and the server answers **404**. Use
+the path your server actually serves. The demo server in this repo is
+HTTP+SSE on `/sse`, not Streamable HTTP — do not point this mode at it.
 
-### stdio transport (local servers)
+### stdio transport (HTTP in front of a local subprocess)
 
-Wrap a local MCP server subprocess:
+`--stdio` does **not** make mcp-trace a stdio MCP server. It still listens on
+HTTP. The process after `--` is the only stdio peer: mcp-trace starts it and
+writes JSON-RPC to its stdin and reads stdout. Do not put `mcp-trace` in a
+client's stdio `command` field — there is no raw stdio pipe on the client side.
 
 ```bash
 mcp-trace --stdio -- npx -y @modelcontextprotocol/server-filesystem ~/Documents
 ```
 
-This starts the MCP server as a subprocess and proxies JSON-RPC over stdio. Your client
-connects to `http://localhost:8001` (or `--port` if you set it), and mcp-trace
-forwards each JSON-RPC request to the subprocess's stdin, reads responses from stdout,
-and emits OTel spans.
+Point an HTTP / Streamable HTTP client at `http://localhost:8001` (or `--port`).
+Each request is forwarded to the subprocess, and the response is an OTel span
+plus a normal HTTP body.
 
 **Another example** with a Python MCP server:
 
@@ -330,10 +337,11 @@ Then point the client's SSE URL at the proxy instead of the server:
 Start mcp-trace pointing at your Streamable HTTP server:
 
 ```bash
-mcp-trace --transport streamable --target http://localhost:8000 --port 8001 --otel-endpoint localhost:4317
+mcp-trace --transport streamable --target http://localhost:8000/mcp --port 8001 --otel-endpoint localhost:4317
 ```
 
-Point your client at the proxy:
+`--target` must be the server's Streamable HTTP path (`/mcp` for the Python
+SDK and FastMCP). The origin root returns 404. Point your client at the proxy:
 
 ```json
 {
@@ -348,7 +356,8 @@ Point your client at the proxy:
 
 ### stdio transport
 
-Start mcp-trace with the MCP server command:
+Start mcp-trace with the server command. The client config below is HTTP, not
+stdio: mcp-trace is the HTTP endpoint, and the `npx` process is the stdio subprocess.
 
 ```bash
 mcp-trace --stdio -- npx -y @modelcontextprotocol/server-filesystem ~/Documents
@@ -367,8 +376,8 @@ Your client connects to `http://localhost:8001`:
 }
 ```
 
-mcp-trace wraps the subprocess and forwards JSON-RPC over stdio, emitting the same
-OTel spans as the HTTP transports.
+mcp-trace wraps the subprocess (stdio on that side only) and emits the same
+OTel spans as the HTTP transports. The client speaks HTTP to mcp-trace.
 
 ### Limitation: servers advertising an absolute POST endpoint
 

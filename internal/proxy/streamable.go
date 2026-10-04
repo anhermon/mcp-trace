@@ -2,12 +2,15 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/anhermon/mcp-trace/v2/internal/telemetry"
@@ -144,9 +147,12 @@ func (p *StreamableProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream the response and parse JSON-RPC responses
+	// Stream the response and parse JSON-RPC responses.
+	// application/json is one document. The Python SDK's default Streamable
+	// HTTP mode (json_response=False) answers the same POST with
+	// text/event-stream instead, and that body is not a JSON document.
 	if spanStarted && resp.StatusCode < 400 {
-		p.streamAndParseResponse(w, resp.Body, inflight)
+		p.streamAndParseResponse(w, resp.Body, resp.Header.Get("Content-Type"), inflight)
 	} else {
 		// Just forward without parsing
 		_, _ = io.Copy(w, resp.Body)
@@ -155,32 +161,122 @@ func (p *StreamableProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // streamAndParseResponse streams the response body to the client while parsing
 // JSON-RPC responses to close spans.
-func (p *StreamableProxy) streamAndParseResponse(w http.ResponseWriter, r io.Reader, inflight *InFlightRequest) {
+func (p *StreamableProxy) streamAndParseResponse(w http.ResponseWriter, r io.Reader, contentType string, inflight *InFlightRequest) {
 	var buf bytes.Buffer
 	tee := io.TeeReader(r, &buf)
 
-	// Stream to client
+	// Stream to client. Bytes are copied unchanged; parsing uses the copy.
 	written, _ := io.Copy(w, tee)
 
 	if written == 0 {
 		return
 	}
 
-	// Parse the complete response
 	data := buf.Bytes()
+	if isEventStream(contentType) {
+		// Default Streamable HTTP (Python SDK json_response=False, and the
+		// same shape from sse-starlette): the POST body is an SSE stream.
+		// Each JSON-RPC message is one event, typically
+		//
+		//	event: message
+		//	data: {"jsonrpc":"2.0","id":1,"result":...}
+		//
+		// A priming event (empty data) and notifications can precede the
+		// response. Parsing the whole body as one JSON document fails, and
+		// returning here used to leave the span open so it was never exported.
+		p.endSpanFromEventStream(data, inflight)
+		return
+	}
+
 	resp, err := ParseResponse(data)
 	if err != nil {
 		p.logger.Debug("could not parse response as JSON-RPC", "err", err)
 		return
 	}
+	p.finishIfMatch(inflight, resp, len(data))
+}
 
-	if resp.ID == nil {
-		return
+// isEventStream reports whether the upstream Content-Type is SSE. Parameters
+// such as charset=utf-8, which sse-starlette adds, do not change the media type.
+func isEventStream(contentType string) bool {
+	media, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(media, "text/event-stream")
+}
+
+// endSpanFromEventStream closes inflight from the first SSE event whose data
+// is the JSON-RPC response for that request. Other events (priming, progress
+// notifications, server requests with a different id) are ignored. If the
+// stream ends with no matching response, the span is still ended so it is
+// exported instead of leaking.
+func (p *StreamableProxy) endSpanFromEventStream(data []byte, inflight *InFlightRequest) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELine)
+
+	var dataLines []string
+	ended := false
+	finishEvent := func() {
+		payload := strings.Join(dataLines, "\n")
+		dataLines = nil
+		if ended || strings.TrimSpace(payload) == "" {
+			return
+		}
+		resp, err := ParseResponse([]byte(payload))
+		if err != nil || resp.ID == nil {
+			return
+		}
+		if p.finishIfMatch(inflight, resp, len(payload)) {
+			ended = true
+		}
 	}
 
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			finishEvent()
+			continue
+		}
+		if strings.HasPrefix(line, ":") || strings.HasPrefix(line, "id:") || strings.HasPrefix(line, "retry:") {
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, sseFieldValue(line, "data:"))
+		}
+	}
+	if len(dataLines) > 0 {
+		finishEvent()
+	}
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		p.logger.Debug("reading streamable event stream", "err", err)
+	}
+	if !ended {
+		p.endInFlight(inflight, telemetry.StatusAbandoned,
+			"streamable HTTP event stream closed before a JSON-RPC response arrived")
+	}
+}
+
+// sseFieldValue returns an SSE field value, dropping the single optional space
+// the spec allows after the colon and nothing else.
+func sseFieldValue(line, prefix string) string {
+	v := strings.TrimPrefix(line, prefix)
+	return strings.TrimPrefix(v, " ")
+}
+
+// finishIfMatch ends inflight when resp is the JSON-RPC response for it.
+// Returns false when the message is for a different id, so the caller can
+// keep reading.
+func (p *StreamableProxy) finishIfMatch(inflight *InFlightRequest, resp *RPCResponse, responseSize int) bool {
+	if resp == nil || resp.ID == nil {
+		return false
+	}
 	id := IDString(resp.ID)
 	if id == "" || id != inflight.RequestID {
-		return
+		return false
 	}
 
 	durationMS := float64(time.Since(inflight.StartTime).Microseconds()) / 1000.0
@@ -196,9 +292,10 @@ func (p *StreamableProxy) streamAndParseResponse(w http.ResponseWriter, r io.Rea
 		ErrMsg:       errMsg,
 		ErrCode:      errCode,
 		ToolName:     inflight.ToolName,
-		ResponseSize: len(data),
+		ResponseSize: responseSize,
 	})
 	p.logger.Debug("span ended", "id", id, "method", inflight.Method, "duration_ms", durationMS, "error", isErr)
+	return true
 }
 
 func (p *StreamableProxy) endInFlight(e *InFlightRequest, status, errMsg string) {
