@@ -76,7 +76,7 @@ go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@latest
 Or pin to a specific release (recommended for production):
 
 ```bash
-go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.2
+go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.4
 ```
 
 Or download a binary for your platform from
