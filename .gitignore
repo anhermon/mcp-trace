@@ -6,3 +6,6 @@ dist/
 *.test
 coverage.out
 coverage.html
+
+# compiled binary at repo root
+/mcp-trace
