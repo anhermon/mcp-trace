@@ -158,6 +158,14 @@ jobs:
       - name: Cross-compile
         run: task release
 
+      # Generated here, from the exact bytes uploaded below, so the sums can
+      # never describe a different build (v2.0.4's hand-uploaded SHA256SUMS did).
+      - name: Generate checksums
+        run: |
+          (cd dist && sha256sum mcp-trace_* > SHA256SUMS)
+          cat dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
