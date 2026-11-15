@@ -178,6 +178,8 @@ All flags can be set via a `.mcp-trace.yaml` file (see `.mcp-trace.yaml.example`
 
 ### DNS-rebinding protection
 
+**Breaking change (upgrading from earlier versions):** mcp-trace now answers HTTP 403 to any request whose `Host` header, or `Origin` header when present, is not `localhost`, a `*.localhost` name or a loopback address. This applies to every transport (`sse`, `streamable`, `stdio`). If clients reach the proxy under another name or IP (a Docker Compose service name, a LAN hostname, a reverse proxy), add it with `--allowed-hosts` / `MCP_TRACE_ALLOWED_HOSTS` / `allowed_hosts`.
+
 mcp-trace only serves requests whose `Host` header, and `Origin` header when
 there is one, is `localhost`, a `*.localhost` name, or a loopback address
 (`127.0.0.0/8`, `::1`). Anything else gets HTTP 403 with a JSON-RPC error and
