@@ -155,8 +155,32 @@ func (p *StreamableProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.streamAndParseResponse(w, resp.Body, resp.Header.Get("Content-Type"), inflight)
 	} else {
 		// Just forward without parsing
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = io.Copy(newFlushWriter(w), resp.Body)
 	}
+}
+
+// flushWriter flushes after every write. A Streamable HTTP response can be a
+// long-lived text/event-stream on which the server sends a request to the
+// client (sampling/createMessage, elicitation/create) and then waits for the
+// client to answer on a new POST. Without a flush per chunk, net/http buffers
+// that event, the client never sees it, and the call deadlocks until the
+// client's request timeout.
+type flushWriter struct {
+	w http.ResponseWriter
+	f http.Flusher
+}
+
+func newFlushWriter(w http.ResponseWriter) io.Writer {
+	f, _ := w.(http.Flusher)
+	return &flushWriter{w: w, f: f}
+}
+
+func (fw *flushWriter) Write(b []byte) (int, error) {
+	n, err := fw.w.Write(b)
+	if fw.f != nil {
+		fw.f.Flush()
+	}
+	return n, err
 }
 
 // streamAndParseResponse streams the response body to the client while parsing
@@ -166,7 +190,7 @@ func (p *StreamableProxy) streamAndParseResponse(w http.ResponseWriter, r io.Rea
 	tee := io.TeeReader(r, &buf)
 
 	// Stream to client. Bytes are copied unchanged; parsing uses the copy.
-	written, _ := io.Copy(w, tee)
+	written, _ := io.Copy(newFlushWriter(w), tee)
 
 	if written == 0 {
 		return
