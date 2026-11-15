@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -59,6 +61,11 @@ for line in sys.stdin:
         sid = "s-%s" % m["id"]
         pending[sid] = m
         send({"jsonrpc":"2.0","id":sid,"method":"sampling/createMessage","params":{"messages":[],"maxTokens":5}})
+    elif m["method"] == "tools/call" and name == "flood":
+        blob = "x" * 100000
+        for i in range(200):
+            send({"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":blob}})
+        send({"jsonrpc":"2.0","id":m["id"],"result":{"content":[{"type":"text","text":"flooded"}]}})
     elif m["method"] == "tools/call" and name == "last":
         send({"jsonrpc":"2.0","id":m["id"],"result":{"content":[{"type":"text","text":json.dumps(last["answer"])}]}})
     elif m["method"] == "tools/call" and name in ("slow", "fast"):
@@ -433,5 +440,148 @@ func TestStdio_ServerRequestRejectedWhenStreamClosesAfterDelivery(t *testing.T) 
 		t.Fatal("no sampling span")
 	} else {
 		requireAttr(t, *sr, "mcp.status", "abandoned")
+	}
+}
+
+// A client that opened the GET stream and then stopped reading (here: never
+// reads, tiny receive buffer) must not stall everyone else. Its writes time
+// out, its stream is dropped, and other clients keep getting answers.
+func TestStdio_StalledReaderDoesNotBlockOthers(t *testing.T) {
+	old := stdioWriteTimeout
+	stdioWriteTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { stdioWriteTimeout = old })
+
+	h := newRelayHarness(t)
+	addr := strings.TrimPrefix(h.url, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.(*net.TCPConn).SetReadBuffer(4096)
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\n\r\n", addr)
+	time.Sleep(100 * time.Millisecond) // let the GET stream register; never read from it
+
+	// A JSON-only client: the flood of log notifications goes to the stalled
+	// GET stream, ~20 MB, far more than socket buffers hold.
+	done := make(chan string, 1)
+	go func() {
+		resp := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"flood"}}`, false)
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		done <- string(b)
+	}()
+	select {
+	case b := <-done:
+		if !strings.Contains(b, "flooded") {
+			t.Fatalf("response = %s", b)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a client that stopped reading stalled the bridge for everyone")
+	}
+}
+
+// Progress whose proxy token matches no open stream (its request ended, or
+// its client takes only JSON) is dropped, not handed to another client.
+func TestStdio_UnmatchedProgressIsDropped(t *testing.T) {
+	p := &StdioProxy{router: newStdioRouter(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	other := &stdioStream{msgs: make(chan stdioMsg, 4), sse: true}
+	p.register(other, clientKey("sess-b", "1"))
+	get := &stdioStream{msgs: make(chan stdioMsg, 4), sse: true, get: true}
+	p.register(get, "")
+
+	p.dispatch([]byte(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"mcp-trace-99","progress":1}}`))
+	if len(other.msgs) != 0 || len(get.msgs) != 0 {
+		t.Fatal("progress for an unknown token was delivered to another stream")
+	}
+	// Ordinary notifications still route to the newest request stream.
+	p.dispatch([]byte(`{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"x"}}`))
+	if len(other.msgs) != 1 {
+		t.Fatal("log notification was not routed to the open request stream")
+	}
+}
+
+// When the client stream closes while a server request is being delivered,
+// the subprocess gets exactly one error answer: from unregister, not a
+// second one from the failed delivery.
+func TestStdio_UndeliverableServerRequestAnsweredOnce(t *testing.T) {
+	var stdin lockedBuffer
+	p := &StdioProxy{
+		router:  newStdioRouter(),
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		filter:  &Filter{},
+		tracer:  sdktrace.NewTracerProvider().Tracer("t"),
+		stdin:   &stdin,
+		running: true,
+	}
+	st := &stdioStream{msgs: make(chan stdioMsg), sse: true, ctx: context.Background()} // unbuffered, never read
+	p.register(st, clientKey("s", "1"))
+
+	dispatched := make(chan struct{})
+	go func() {
+		p.dispatch([]byte(`{"jsonrpc":"2.0","id":"srv-1","method":"sampling/createMessage","params":{}}`))
+		close(dispatched)
+	}()
+	// Wait until the request is registered and delivery is blocked.
+	deadline := time.Now().Add(2 * time.Second)
+	for st.awaiting.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("server request never registered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	p.unregister(st)
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch stayed blocked after the stream closed")
+	}
+	if n := strings.Count(stdin.String(), `"id":"srv-1"`); n != 1 {
+		t.Fatalf("subprocess got %d answers for the server request, want 1:\n%s", n, stdin.String())
+	}
+	if !strings.Contains(stdin.String(), "-32603") {
+		t.Errorf("answer is not a JSON-RPC error: %s", stdin.String())
+	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+func (b *lockedBuffer) Close() error { return nil }
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestStdio_EmptyStringIDIsARequest(t *testing.T) {
+	h := newRelayHarness(t)
+	resp := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","id":"","method":"ping"}`, false)
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"id":""`) {
+		t.Fatalf("got %d %s, want 200 with the response for id \"\"", resp.StatusCode, b)
+	}
+}
+
+func TestStdio_ErrorResponseWithoutIDIsAcceptedAndDropped(t *testing.T) {
+	h := newRelayHarness(t)
+	resp := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"}}`, false)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	r := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"last"}}`, false)
+	defer r.Body.Close()
+	b, _ := io.ReadAll(r.Body)
+	if !strings.Contains(string(b), `"text":"null"`) {
+		t.Errorf("the dropped error response reached the subprocess: %s", b)
 	}
 }
