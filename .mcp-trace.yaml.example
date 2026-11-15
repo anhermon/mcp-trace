@@ -44,5 +44,11 @@ include_lifecycle: false
 # *names* are always recorded as mcp.tool.argument_keys.
 capture_tool_args: false
 
+# Extra hostnames accepted in the Host and Origin headers of incoming requests.
+# By default only localhost and loopback addresses are served (DNS-rebinding
+# protection); anything else gets HTTP 403. Add the names clients use to reach
+# the proxy, e.g. a Docker service name or a LAN host. "*" disables the check.
+allowed_hosts: []
+
 # Log level: debug | info | warn | error
 log_level: info

@@ -217,7 +217,9 @@ func TestStreamable_InitializeRemembersClient(t *testing.T) {
 	requireAttr(t, *toolSpan, "mcp.client.version", "1.0")
 }
 
-func TestStreamable_OnlyPostAllowed(t *testing.T) {
+// GET (the standalone server-to-client stream) is forwarded; the upstream's
+// own answer, here 405, reaches the client unchanged.
+func TestStreamable_GetForwardsUpstreamStatus(t *testing.T) {
 	h := newStreamableTestHarness(t, &Filter{})
 
 	resp, err := http.Get(h.proxySrv.URL)

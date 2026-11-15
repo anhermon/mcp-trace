@@ -210,6 +210,15 @@ func serve(cfg config.Config) error {
 		return fmt.Errorf("unsupported transport mode: %s", cfg.Transport)
 	}
 
+	// Every transport listens on all interfaces, so every one gets the
+	// DNS-rebinding guard (Host/Origin must be local unless allowlisted).
+	handler = proxy.NewHostGuard(handler, cfg.AllowedHosts, logger)
+	for _, h := range cfg.AllowedHosts {
+		if h == proxy.AllowAnyHost {
+			logger.Warn("Host/Origin validation disabled (--allowed-hosts=*): the proxy is exposed to DNS rebinding")
+		}
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
 		Addr:              addr,
@@ -241,6 +250,7 @@ func serve(cfg config.Config) error {
 		"include_lifecycle", cfg.IncludeLifecycle,
 		"otel_http", cfg.OTel.HTTP,
 		"capture_tool_args", cfg.CaptureToolArgs,
+		"allowed_hosts", cfg.AllowedHosts,
 	)
 
 	if cfg.Transport == config.TransportStdio {
