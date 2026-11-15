@@ -573,10 +573,15 @@ func TestStdio_EmptyStringIDIsARequest(t *testing.T) {
 
 func TestStdio_ErrorResponseWithoutIDIsAcceptedAndDropped(t *testing.T) {
 	h := newRelayHarness(t)
-	resp := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"}}`, false)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"}}`,
+		`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}`,
+	} {
+		resp := h.do(t, context.Background(), http.MethodPost, body, false)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("%s: status = %d, want 202", body, resp.StatusCode)
+		}
 	}
 	r := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"last"}}`, false)
 	defer r.Body.Close()
