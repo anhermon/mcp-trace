@@ -38,6 +38,20 @@ type stdioStream struct {
 	childID       string          // proxy-assigned id the subprocess sees (POST only)
 	progressToken string          // params._meta.progressToken of the request
 	awaiting      atomic.Int32    // server-to-client requests not yet answered
+	answered      chan struct{}   // signalled when the client answers one (POST only)
+}
+
+// noteAnswered restarts the response timeout of a request whose server
+// request was just answered: the subprocess now has the full timeout again.
+func (s *stdioStream) noteAnswered() {
+	s.awaiting.Add(-1)
+	if s.answered == nil {
+		return
+	}
+	select {
+	case s.answered <- struct{}{}:
+	default:
+	}
 }
 
 func (s *stdioStream) awaitingClient() bool { return s.awaiting.Load() > 0 }
@@ -269,7 +283,7 @@ func (p *StdioProxy) finishServerRequest(id string, body []byte) {
 	if sr == nil {
 		return
 	}
-	sr.stream.awaiting.Add(-1)
+	sr.stream.noteAnswered()
 	status, errMsg, errCode := telemetry.StatusOK, "", 0
 	if resp, err := ParseResponse(body); err == nil {
 		var isErr bool

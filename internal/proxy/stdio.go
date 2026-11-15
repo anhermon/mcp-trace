@@ -363,6 +363,7 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	// the client gets its own id back on the response.
 	st := &stdioStream{
 		msgs:          make(chan stdioMsg, 64),
+		answered:      make(chan struct{}, 1),
 		sse:           acceptsEventStream(r),
 		ctx:           spanCtx,
 		sessionID:     sessionID,
@@ -404,6 +405,8 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "subprocess closed", http.StatusBadGateway)
 			}
 			return
+		case <-st.answered:
+			resetTimer(idle, stdioResponseTimeout)
 		case <-idle.C:
 			if st.awaitingClient() {
 				// The subprocess is waiting on the client (a person answering
