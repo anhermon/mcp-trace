@@ -1,3 +1,14 @@
+> [!NOTE]
+> **Archived November 2026. This project is no longer developed.**
+>
+> Why: it was built to get one OpenTelemetry span per MCP tool call without touching the server. That need is now met by maintained projects with far wider use, so continuing here would duplicate them:
+>
+> - MCP gateways that emit OpenTelemetry traces with no server changes: [agentgateway](https://github.com/agentgateway/agentgateway), [MCP Context Forge](https://github.com/IBM/mcp-context-forge), [Docker MCP Gateway](https://github.com/docker/mcp-gateway).
+> - The official MCP SDKs now propagate trace context natively, and OpenTelemetry has [MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/mcp.md); mcp-trace predates them and uses its own `mcp.*` attribute names.
+> - We were not running it in our own setup, and we only keep building tools we use ourselves.
+>
+> The code still builds and its tests pass, and the last release (v2.0.4) remains available. For a current map of the space, see [awesome-agent-observability](https://github.com/anhermon/awesome-agent-observability).
+
 # mcp-trace
 
 [![CI](https://github.com/anhermon/mcp-trace/actions/workflows/ci.yml/badge.svg)](https://github.com/anhermon/mcp-trace/actions/workflows/ci.yml)
