@@ -128,6 +128,63 @@ Point an HTTP / Streamable HTTP client at `http://localhost:8001` (or `--port`).
 Each request is forwarded to the subprocess, and the response is an OTel span
 plus a normal HTTP body.
 
+The HTTP side is a full Streamable HTTP endpoint:
+
+- A client that accepts `text/event-stream` gets each response as an event
+  stream. The stream also carries what the subprocess sends while that
+  request is open: log and progress notifications, plus requests to the
+  client (`sampling/createMessage`, `elicitation/create`, `roots/list`). The
+  client POSTs its answer, and mcp-trace writes it to the subprocess's stdin.
+  A JSON-only client still gets plain `application/json`.
+- `GET` with `Accept: text/event-stream` opens the standalone stream for
+  messages that arrive when no request stream is open.
+- `initialize` gets an `Mcp-Session-Id`, but it does not isolate clients:
+  every client shares the one subprocess, which sees a single session, and
+  requests without the header are still served.
+- Request ids and progress tokens are rewritten on the way to the subprocess
+  and restored on the way back, and cancellations are matched within the
+  client's session, so concurrent clients that reuse ids (every SDK starts at
+  0 or 1) never get each other's responses or progress.
+
+A stdio subprocess doesn't say which request a notification or server
+request belongs to, so mcp-trace routes it as follows:
+
+- Progress goes to the request that set the matching `progressToken`.
+- Anything else goes to the most recently opened request stream, or else
+  the newest `GET` stream.
+- If no stream is open, the subprocess gets a JSON-RPC error instead of
+  waiting forever. The same happens when the stream a server request went
+  out on closes before the client answers it.
+- Progress for a request that has ended, or whose client takes only JSON, is
+  dropped rather than delivered to another client.
+
+With more than one client connected, the newest-stream rule can hand one client's
+messages to another: log notifications and server requests, including a
+sampling prompt or an elicitation question, go to whichever request stream
+opened last, even when it belongs to a different client, and that client's
+answer goes back to the subprocess. Run one `--stdio` proxy per client when
+that matters.
+
+Two more limits of sharing one subprocess:
+
+- `mcp.client.name` and `mcp.client.version` on spans come from the most
+  recent `initialize`, so with several clients a span can carry another
+  client's name.
+- One reader serves every client. A client that stops reading its event
+  stream can fill its 64-message buffer, and from then on every client's
+  traffic from the subprocess waits until that client reads again or
+  disconnects.
+
+On shutdown mcp-trace closes the subprocess's stdin and, if it is still
+running after 5 seconds, kills that process only. A server that ignores the
+end of stdin, or a child of a wrapper such as `npx` or `sh -c`, can be left
+running; nothing is cleaned up if mcp-trace itself is killed with SIGKILL.
+
+Relayed server requests get their own span (`mcp.direction=server_to_client`,
+a child of the request in flight). The 30-second response timeout is paused
+while the subprocess waits on the client, for example while a person answers
+an elicitation.
+
 **Another example** with a Python MCP server:
 
 ```bash

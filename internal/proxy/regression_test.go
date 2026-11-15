@@ -39,8 +39,10 @@ func TestRegression_LargePayloadSurvivesSSE(t *testing.T) {
 		t.Error("large tool result did not survive the proxy intact")
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	if spans := h.spans(); len(spans) != 1 {
+	// The span ends just after the client has the data; poll rather than
+	// sleep a fixed 50ms, which flaked under -race with coverage on a loaded
+	// runner.
+	if spans := waitSpans(h.exporter, 1); len(spans) != 1 {
 		t.Fatalf("expected 1 span for the large tool call, got %d", len(spans))
 	}
 }
