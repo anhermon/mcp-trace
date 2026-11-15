@@ -283,15 +283,26 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '[' && json.Valid(trimmed) {
+		// JSON-RPC batches were removed from MCP in protocol 2025-06-18.
+		writeBadRequest(w, nil, -32600, "batch requests are not supported")
+		return
+	}
 	rpcReq, err := ParseRequest(body)
 	if err != nil {
 		p.logger.Warn("unparseable JSON-RPC request", "bytes", len(body), "err", err)
-		writeJSONRPCError(w, http.StatusBadRequest, nil, -32700, "parse error")
+		writeBadRequest(w, nil, -32700, "parse error")
 		return
 	}
 	requestID := IDString(rpcReq.ID)
-	if requestID == "null" {
-		requestID = ""
+	switch {
+	case string(rpcReq.ID) == "null":
+		// Neither a request nor a response the bridge can correlate.
+		writeBadRequest(w, nil, -32600, "invalid request: id must not be null")
+		return
+	case rpcReq.Method == "" && requestID == "":
+		writeBadRequest(w, nil, -32600, "invalid request: no method and no id")
+		return
 	}
 
 	// The client answering a server-to-client request, or a notification:
@@ -380,7 +391,7 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		p.endInFlightStdio(inflight, telemetry.StatusError, "rewriting request id failed")
-		writeJSONRPCError(w, http.StatusBadRequest, rpcReq.ID, -32600, "invalid request")
+		writeBadRequest(w, rpcReq.ID, -32600, "invalid request")
 		return
 	}
 	if err := p.writeChild(msg); err != nil {
@@ -542,7 +553,8 @@ func resetTimer(t *time.Timer, d time.Duration) {
 	t.Reset(d)
 }
 
-func writeJSONRPCError(w http.ResponseWriter, status int, id json.RawMessage, code int, msg string) {
+// writeBadRequest answers 400 with a JSON-RPC error body.
+func writeBadRequest(w http.ResponseWriter, id json.RawMessage, code int, msg string) {
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
@@ -552,7 +564,7 @@ func writeJSONRPCError(w http.ResponseWriter, status int, id json.RawMessage, co
 		"error":   map[string]any{"code": code, "message": msg},
 	})
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusBadRequest)
 	_, _ = w.Write(body)
 }
 

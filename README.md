@@ -153,14 +153,27 @@ request belongs to, so mcp-trace routes it as follows:
 - Anything else goes to the most recently opened request stream, or else
   the newest `GET` stream.
 - If no stream is open, the subprocess gets a JSON-RPC error instead of
-  waiting forever.
+  waiting forever. The same happens when the stream a server request went
+  out on closes before the client answers it.
+- Progress for a request that has ended, or whose client takes only JSON, is
+  dropped rather than delivered to another client.
 
-With more than one client connected, that last rule can hand one client's
+With more than one client connected, the newest-stream rule can hand one client's
 messages to another: log notifications and server requests, including a
 sampling prompt or an elicitation question, go to whichever request stream
 opened last, even when it belongs to a different client, and that client's
 answer goes back to the subprocess. Run one `--stdio` proxy per client when
 that matters.
+
+Two more limits of sharing one subprocess:
+
+- `mcp.client.name` and `mcp.client.version` on spans come from the most
+  recent `initialize`, so with several clients a span can carry another
+  client's name.
+- One reader serves every client. A client that stops reading its event
+  stream can fill its 64-message buffer, and from then on every client's
+  traffic from the subprocess waits until that client reads again or
+  disconnects.
 
 On shutdown mcp-trace closes the subprocess's stdin and, if it is still
 running after 5 seconds, kills that process only. A server that ignores the

@@ -61,6 +61,7 @@ func (s *stdioStream) awaitingClient() bool { return s.awaiting.Load() > 0 }
 // waiting for the client's answer.
 type stdioServerRequest struct {
 	span   trace.Span // nil when the method is not traced
+	rawID  json.RawMessage
 	method string
 	start  time.Time
 	stream *stdioStream
@@ -149,6 +150,10 @@ func (p *StdioProxy) unregister(st *stdioStream) {
 	for _, sr := range orphaned {
 		endServerRequestSpan(sr, telemetry.StatusAbandoned,
 			"client stream closed before the client answered the server request", 0, 0)
+		// Answer the subprocess so it does not wait forever. If the client
+		// still answers later on another POST, the subprocess sees a second
+		// response for an id it already settled, which SDKs ignore.
+		p.rejectServerRequest(sr.rawID, "client stream closed before the client answered the request")
 	}
 }
 
@@ -161,6 +166,11 @@ func (rt *stdioRouter) pickStream(progressToken string) *stdioStream {
 				return rt.streams[i]
 			}
 		}
+		// Every token the subprocess knows was assigned by the proxy, so an
+		// unmatched one belongs to a request that has ended or whose client
+		// cannot take events (JSON-only). Delivering it elsewhere would leak
+		// it to another client.
+		return nil
 	}
 	for i := len(rt.streams) - 1; i >= 0; i-- {
 		if !rt.streams[i].get {
@@ -212,11 +222,27 @@ func (p *StdioProxy) dispatch(data []byte) {
 		deliver(st, stdioMsg{data: data, final: true})
 
 	case msg.Method != "" && id != "": // server-to-client request
+		p.mu.Lock()
+		name, ver := p.clientName, p.clientVer
+		p.mu.Unlock()
 		rt.mu.Lock()
 		st := rt.pickStream("")
 		var sr *stdioServerRequest
 		if st != nil {
-			sr = &stdioServerRequest{method: msg.Method, start: time.Now(), stream: st}
+			// The span is started before sr is visible to other goroutines
+			// (unregister reads it).
+			sr = &stdioServerRequest{rawID: msg.ID, method: msg.Method, start: time.Now(), stream: st}
+			if p.filter.ShouldTraceServerRequest(msg.Method) {
+				_, sr.span = telemetry.StartSpan(st.ctx, p.tracer, telemetry.SpanAttrs{
+					Method:     msg.Method,
+					RequestID:  id,
+					SessionID:  st.sessionID,
+					Target:     "stdio",
+					Direction:  telemetry.DirectionServerToClient,
+					ClientName: name,
+					ClientVer:  ver,
+				})
+			}
 			rt.serverReqs[id] = sr
 			st.awaiting.Add(1)
 		}
@@ -227,30 +253,21 @@ func (p *StdioProxy) dispatch(data []byte) {
 			p.rejectServerRequest(msg.ID, "no client stream is open to deliver the request")
 			return
 		}
-		if p.filter.ShouldTraceServerRequest(msg.Method) {
-			p.mu.Lock()
-			name, ver := p.clientName, p.clientVer
-			p.mu.Unlock()
-			_, sr.span = telemetry.StartSpan(st.ctx, p.tracer, telemetry.SpanAttrs{
-				Method:     msg.Method,
-				RequestID:  id,
-				SessionID:  st.sessionID,
-				Target:     "stdio",
-				Direction:  telemetry.DirectionServerToClient,
-				ClientName: name,
-				ClientVer:  ver,
-			})
-		}
 		p.logger.Debug("server request relayed to client", "id", id, "method", msg.Method, "get_stream", st.get)
 		if !deliver(st, stdioMsg{data: data}) {
 			rt.mu.Lock()
-			if rt.serverReqs[id] == sr {
+			owned := rt.serverReqs[id] == sr
+			if owned {
 				delete(rt.serverReqs, id)
 			}
 			rt.mu.Unlock()
-			st.awaiting.Add(-1)
-			endServerRequestSpan(sr, telemetry.StatusAbandoned, "client stream closed before delivery", 0, 0)
-			p.rejectServerRequest(msg.ID, "client stream closed before the request was delivered")
+			// If unregister got there first it has already ended the span
+			// and answered the subprocess.
+			if owned {
+				st.awaiting.Add(-1)
+				endServerRequestSpan(sr, telemetry.StatusAbandoned, "client stream closed before delivery", 0, 0)
+				p.rejectServerRequest(msg.ID, "client stream closed before the request was delivered")
+			}
 		}
 
 	case msg.Method != "": // notification

@@ -34,6 +34,7 @@ def send(m):
     with lock:
         print(json.dumps(m), flush=True)
 pending = {}
+last = {"answer": None}
 def later(req, delay, text):
     time.sleep(delay)
     send({"jsonrpc":"2.0","id":req["id"],"result":{"content":[{"type":"text","text":text}]}})
@@ -41,6 +42,7 @@ for line in sys.stdin:
     m = json.loads(line)
     if "method" not in m:
         req = pending.pop(m["id"], None)
+        last["answer"] = m
         if req is not None:
             ans = m.get("result") or m.get("error")
             send({"jsonrpc":"2.0","id":req["id"],"result":{"content":[{"type":"text","text":json.dumps(ans)}]}})
@@ -57,6 +59,8 @@ for line in sys.stdin:
         sid = "s-%s" % m["id"]
         pending[sid] = m
         send({"jsonrpc":"2.0","id":sid,"method":"sampling/createMessage","params":{"messages":[],"maxTokens":5}})
+    elif m["method"] == "tools/call" and name == "last":
+        send({"jsonrpc":"2.0","id":m["id"],"result":{"content":[{"type":"text","text":json.dumps(last["answer"])}]}})
     elif m["method"] == "tools/call" and name in ("slow", "fast"):
         threading.Thread(target=later, args=(m, 0.3 if name == "slow" else 0, name)).start()
     else:
@@ -364,5 +368,70 @@ func TestStdio_ProgressTokensDoNotCollideAcrossClients(t *testing.T) {
 	}
 	if len(b.msgs) != 0 {
 		t.Fatal("B got A's progress")
+	}
+}
+
+func TestStdio_InvalidBodiesAreRejected(t *testing.T) {
+	h := newRelayHarness(t)
+	for _, tc := range []struct {
+		name, body string
+		code       string
+	}{
+		{"batch", `[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, "-32600"},
+		{"empty object", `{}`, "-32600"},
+		{"null id request", `{"jsonrpc":"2.0","id":null,"method":"ping"}`, "-32600"},
+		{"null id response", `{"jsonrpc":"2.0","id":null,"result":{}}`, "-32600"},
+		{"bad json", `{"jsonrpc":`, "-32700"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := h.do(t, context.Background(), http.MethodPost, tc.body, false)
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(b), `"code":`+tc.code) {
+				t.Errorf("got %d %s, want 400 with code %s", resp.StatusCode, b, tc.code)
+			}
+		})
+	}
+	// None of them reached the subprocess: it still answers normally and
+	// has seen no stray message.
+	resp := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"last"}}`, false)
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), `"text":"null"`) {
+		t.Errorf("subprocess saw a rejected body: %s", b)
+	}
+}
+
+// A client that drops its stream after the server's request was delivered
+// can no longer answer it there; the subprocess gets an error instead of
+// waiting forever.
+func TestStdio_ServerRequestRejectedWhenStreamClosesAfterDelivery(t *testing.T) {
+	h := newRelayHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	resp := h.do(t, ctx, http.MethodPost, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask"}}`, true)
+	ev := events(resp.Body)
+	next(t, ev, "logging notification")
+	next(t, ev, "sampling request")
+	cancel()
+	resp.Body.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r := h.do(t, context.Background(), http.MethodPost, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"last"}}`, false)
+		b, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		if strings.Contains(string(b), "client stream closed") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("subprocess never got an error for the undeliverable request; last answer: %s", b)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	spans := waitSpans(h.exp, 2)
+	if sr := spanNamed(spans, "mcp sampling/createMessage"); sr == nil {
+		t.Fatal("no sampling span")
+	} else {
+		requireAttr(t, *sr, "mcp.status", "abandoned")
 	}
 }
