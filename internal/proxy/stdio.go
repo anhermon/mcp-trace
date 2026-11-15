@@ -302,7 +302,7 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 		case "":
 			p.finishServerRequest(requestID, body)
 		case "notifications/cancelled":
-			msg = p.translateCancel(body)
+			msg = p.translateCancel(body, r.Header.Get(mcpSessionHeader))
 		}
 		if err := p.writeChild(msg); err != nil {
 			p.childWriteFailed(w, err)
@@ -362,18 +362,22 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	// share the one subprocess, so the subprocess sees a proxy-assigned id;
 	// the client gets its own id back on the response.
 	st := &stdioStream{
-		msgs:          make(chan stdioMsg, 64),
-		answered:      make(chan struct{}, 1),
-		sse:           acceptsEventStream(r),
-		ctx:           spanCtx,
-		sessionID:     sessionID,
-		clientID:      rpcReq.ID,
-		progressToken: progressTokenOf(rpcReq.Params),
+		msgs:        make(chan stdioMsg, 64),
+		answered:    make(chan struct{}, 1),
+		sse:         acceptsEventStream(r),
+		ctx:         spanCtx,
+		sessionID:   sessionID,
+		clientID:    rpcReq.ID,
+		clientToken: progressTokenRaw(rpcReq.Params),
 	}
-	childID := p.register(st, requestID)
+	childID := p.register(st, clientKey(sessionID, requestID))
 	defer p.unregister(st)
 
 	msg, err := setJSONRPCID(body, []byte(strconv.FormatUint(childID, 10)))
+	if err == nil && st.progressToken != "" {
+		tok, _ := json.Marshal(st.progressToken)
+		msg, err = setProgressToken(msg, true, tok)
+	}
 	if err != nil {
 		p.endInFlightStdio(inflight, telemetry.StatusError, "rewriting request id failed")
 		writeJSONRPCError(w, http.StatusBadRequest, rpcReq.ID, -32600, "invalid request")

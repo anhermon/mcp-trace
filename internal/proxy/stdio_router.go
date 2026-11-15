@@ -36,7 +36,8 @@ type stdioStream struct {
 	sessionID     string          // Mcp-Session-Id the client sent (or was just given)
 	clientID      json.RawMessage // the client's own request id (POST only)
 	childID       string          // proxy-assigned id the subprocess sees (POST only)
-	progressToken string          // params._meta.progressToken of the request
+	progressToken string          // progress token the subprocess sees (proxy-assigned)
+	clientToken   json.RawMessage // the client's own params._meta.progressToken
 	awaiting      atomic.Int32    // server-to-client requests not yet answered
 	answered      chan struct{}   // signalled when the client answers one (POST only)
 }
@@ -79,7 +80,7 @@ type stdioRouter struct {
 	nextID     uint64
 	pending    map[string]*stdioStream // child id -> POST waiting for the response
 	streams    []*stdioStream          // SSE-capable streams, oldest first
-	byClientID map[string]string       // client request id -> child id (for cancellation)
+	byClientID map[string]string       // session + client request id -> child id (for cancellation)
 	serverReqs map[string]*stdioServerRequest
 }
 
@@ -92,7 +93,7 @@ func newStdioRouter() stdioRouter {
 }
 
 // register adds st and, for a POST, assigns the id the subprocess will see.
-func (p *StdioProxy) register(st *stdioStream, clientID string) uint64 {
+func (p *StdioProxy) register(st *stdioStream, clientKey string) uint64 {
 	rt := &p.router
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -103,7 +104,12 @@ func (p *StdioProxy) register(st *stdioStream, clientID string) uint64 {
 		id = rt.nextID
 		st.childID = strconv.FormatUint(id, 10)
 		rt.pending[st.childID] = st
-		rt.byClientID[clientID] = st.childID
+		rt.byClientID[clientKey] = st.childID
+		if len(st.clientToken) > 0 {
+			// Progress tokens are chosen by each client (SDKs reuse the request
+			// id), so they collide across clients just like ids do.
+			st.progressToken = "mcp-trace-" + st.childID
+		}
 	}
 	if st.sse {
 		rt.streams = append(rt.streams, st)
@@ -248,12 +254,18 @@ func (p *StdioProxy) dispatch(data []byte) {
 		}
 
 	case msg.Method != "": // notification
+		tok := progressTokenOfNotification(msg.Method, msg.Params)
 		rt.mu.Lock()
-		st := rt.pickStream(progressTokenOfNotification(msg.Method, msg.Params))
+		st := rt.pickStream(tok)
 		rt.mu.Unlock()
 		if st == nil {
 			p.logger.Debug("dropping notification: no open client stream", "method", msg.Method)
 			return
+		}
+		if tok != "" && tok == st.progressToken && len(st.clientToken) > 0 {
+			if out, err := setProgressToken(data, false, st.clientToken); err == nil {
+				data = out
+			}
 		}
 		deliver(st, stdioMsg{data: data})
 	}
@@ -311,7 +323,7 @@ func endServerRequestSpan(sr *stdioServerRequest, status, errMsg string, errCode
 
 // translateCancel rewrites params.requestId of a client's
 // notifications/cancelled to the id the subprocess knows the request by.
-func (p *StdioProxy) translateCancel(body []byte) []byte {
+func (p *StdioProxy) translateCancel(body []byte, sessionID string) []byte {
 	var n struct {
 		Params map[string]json.RawMessage `json:"params"`
 	}
@@ -319,7 +331,7 @@ func (p *StdioProxy) translateCancel(body []byte) []byte {
 		return body
 	}
 	p.router.mu.Lock()
-	childID, ok := p.router.byClientID[IDString(n.Params["requestId"])]
+	childID, ok := p.router.byClientID[clientKey(sessionID, IDString(n.Params["requestId"]))]
 	p.router.mu.Unlock()
 	if !ok {
 		return body
@@ -362,19 +374,6 @@ func marshalNoEscape(v any) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-// progressTokenOf returns params._meta.progressToken of a request.
-func progressTokenOf(params json.RawMessage) string {
-	var p struct {
-		Meta struct {
-			ProgressToken json.RawMessage `json:"progressToken"`
-		} `json:"_meta"`
-	}
-	if len(params) == 0 || json.Unmarshal(params, &p) != nil {
-		return ""
-	}
-	return IDString(p.Meta.ProgressToken)
-}
-
 func progressTokenOfNotification(method string, params json.RawMessage) string {
 	if method != "notifications/progress" {
 		return ""
@@ -386,4 +385,55 @@ func progressTokenOfNotification(method string, params json.RawMessage) string {
 		return ""
 	}
 	return IDString(p.ProgressToken)
+}
+
+// clientKey scopes a client request id to its session: ids are only unique
+// per client, so a bare id would let one client cancel another's request.
+func clientKey(sessionID, id string) string { return sessionID + "\x00" + id }
+
+// setProgressToken replaces the progress token of a request
+// (params._meta.progressToken, inRequest) or of a notifications/progress
+// (params.progressToken).
+func setProgressToken(msg []byte, inRequest bool, tok json.RawMessage) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(msg, &obj); err != nil {
+		return nil, err
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(obj["params"], &params); err != nil {
+		return nil, err
+	}
+	if inRequest {
+		var meta map[string]json.RawMessage
+		if err := json.Unmarshal(params["_meta"], &meta); err != nil {
+			return nil, err
+		}
+		meta["progressToken"] = tok
+		b, err := marshalNoEscape(meta)
+		if err != nil {
+			return nil, err
+		}
+		params["_meta"] = b
+	} else {
+		params["progressToken"] = tok
+	}
+	b, err := marshalNoEscape(params)
+	if err != nil {
+		return nil, err
+	}
+	obj["params"] = b
+	return marshalNoEscape(obj)
+}
+
+// progressTokenRaw returns params._meta.progressToken of a request as sent.
+func progressTokenRaw(params json.RawMessage) json.RawMessage {
+	var p struct {
+		Meta struct {
+			ProgressToken json.RawMessage `json:"progressToken"`
+		} `json:"_meta"`
+	}
+	if len(params) == 0 || json.Unmarshal(params, &p) != nil || string(p.Meta.ProgressToken) == "null" {
+		return nil
+	}
+	return p.Meta.ProgressToken
 }

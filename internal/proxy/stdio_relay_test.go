@@ -326,8 +326,9 @@ func TestStdio_TimeoutPausedWhileClientAnswers(t *testing.T) {
 func TestStdio_CancelledRequestIDIsTranslated(t *testing.T) {
 	p := &StdioProxy{router: newStdioRouter()}
 	st := &stdioStream{msgs: make(chan stdioMsg, 1)}
-	id := p.register(st, "client-9")
-	out := p.translateCancel([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"client-9","reason":"x"}}`))
+	id := p.register(st, clientKey("sess-a", "client-9"))
+	other := p.register(&stdioStream{msgs: make(chan stdioMsg, 1)}, clientKey("sess-b", "client-9"))
+	out := p.translateCancel([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"client-9","reason":"x"}}`), "sess-a")
 	var n struct {
 		Params struct {
 			RequestID json.RawMessage `json:"requestId"`
@@ -337,6 +338,31 @@ func TestStdio_CancelledRequestIDIsTranslated(t *testing.T) {
 		t.Fatal(err)
 	}
 	if IDString(n.Params.RequestID) != strconv.FormatUint(id, 10) {
-		t.Errorf("requestId = %s, want the subprocess's id %d", n.Params.RequestID, id)
+		t.Errorf("requestId = %s, want the subprocess's id %d (not the other session's %d)", n.Params.RequestID, id, other)
+	}
+}
+
+// Two clients that pick the same progress token (SDKs reuse the request id)
+// must each get only their own progress, with their own token restored.
+func TestStdio_ProgressTokensDoNotCollideAcrossClients(t *testing.T) {
+	p := &StdioProxy{router: newStdioRouter(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	a := &stdioStream{msgs: make(chan stdioMsg, 4), sse: true, clientToken: json.RawMessage(`1`)}
+	b := &stdioStream{msgs: make(chan stdioMsg, 4), sse: true, clientToken: json.RawMessage(`1`)}
+	p.register(a, clientKey("sess-a", "1"))
+	p.register(b, clientKey("sess-b", "1"))
+	if a.progressToken == b.progressToken {
+		t.Fatalf("both streams got subprocess token %q", a.progressToken)
+	}
+	p.dispatch([]byte(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"` + a.progressToken + `","progress":1}}`))
+	select {
+	case m := <-a.msgs:
+		if !strings.Contains(string(m.data), `"progressToken":1`) {
+			t.Errorf("client token not restored: %s", m.data)
+		}
+	default:
+		t.Fatal("A did not get its own progress")
+	}
+	if len(b.msgs) != 0 {
+		t.Fatal("B got A's progress")
 	}
 }
