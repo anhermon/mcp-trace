@@ -295,19 +295,30 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestID := IDString(rpcReq.ID)
+	// Presence, not value, decides: "" is a valid JSON-RPC id, so a request
+	// with "id": "" expects a response like any other.
+	hasID := len(rpcReq.ID) > 0
 	switch {
 	case string(rpcReq.ID) == "null":
 		// Neither a request nor a response the bridge can correlate.
 		writeBadRequest(w, nil, -32600, "invalid request: id must not be null")
 		return
-	case rpcReq.Method == "" && requestID == "":
+	case rpcReq.Method == "" && !hasID:
+		if isErrorResponse(body) {
+			// An error response without an id (JSON-RPC allows one for a
+			// parse error) answers nothing the subprocess could correlate:
+			// accept it and drop it.
+			p.logger.Debug("dropping client error response without an id")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		writeBadRequest(w, nil, -32600, "invalid request: no method and no id")
 		return
 	}
 
 	// The client answering a server-to-client request, or a notification:
 	// forward and acknowledge, nothing comes back on this POST.
-	if rpcReq.Method == "" || requestID == "" {
+	if rpcReq.Method == "" || !hasID {
 		msg := body
 		switch rpcReq.Method {
 		case "":
@@ -438,7 +449,11 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 			resetTimer(idle, stdioResponseTimeout)
 			if !m.final {
 				if st.sse {
-					writeSSEMessage(w, m.data)
+					if err := writeSSEMessage(w, m.data); err != nil {
+						p.logger.Warn("dropping client stream: write failed or timed out", "err", err)
+						p.endInFlightStdio(inflight, telemetry.StatusAbandoned, "client stopped reading the event stream")
+						return
+					}
 				}
 				continue
 			}
@@ -468,7 +483,9 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 				p.logger.Debug("span ended", "id", requestID, "method", inflight.Method, "duration_ms", durationMS)
 			}
 			if st.sse {
-				writeSSEMessage(w, data)
+				if err := writeSSEMessage(w, data); err != nil {
+					p.logger.Debug("writing final response to client failed", "err", err)
+				}
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -504,7 +521,10 @@ func (p *StdioProxy) handleGet(w http.ResponseWriter, r *http.Request) {
 		case <-p.childGone:
 			return
 		case m := <-st.msgs:
-			writeSSEMessage(w, m.data)
+			if err := writeSSEMessage(w, m.data); err != nil {
+				p.logger.Warn("dropping GET stream: write failed or timed out", "err", err)
+				return
+			}
 		}
 	}
 }
@@ -538,9 +558,36 @@ func flush(w http.ResponseWriter) {
 	}
 }
 
-func writeSSEMessage(w http.ResponseWriter, data []byte) {
-	_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
-	flush(w)
+// stdioWriteTimeout bounds each event-stream write. One reader serves every
+// client, so a client that stops reading (or half-closed its connection and
+// went quiet) would otherwise stall everyone once its buffer filled; after
+// this long its stream is dropped instead.
+var stdioWriteTimeout = 10 * time.Second
+
+// writeSSEMessage writes one event and flushes it, failing if the client has
+// not taken it within stdioWriteTimeout.
+func writeSSEMessage(w http.ResponseWriter, data []byte) error {
+	rc := http.NewResponseController(w)
+	// ErrNotSupported (a writer without deadlines) just means no bound.
+	_ = rc.SetWriteDeadline(time.Now().Add(stdioWriteTimeout))
+	if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", data); err != nil {
+		return err
+	}
+	if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	// Clear it: the deadline is per connection and would otherwise outlive
+	// this response on a kept-alive connection.
+	_ = rc.SetWriteDeadline(time.Time{})
+	return nil
+}
+
+// isErrorResponse reports whether body is a JSON-RPC error response.
+func isErrorResponse(body []byte) bool {
+	var m struct {
+		Error json.RawMessage `json:"error"`
+	}
+	return json.Unmarshal(body, &m) == nil && len(m.Error) > 0 && string(m.Error) != "null"
 }
 
 func resetTimer(t *time.Timer, d time.Duration) {

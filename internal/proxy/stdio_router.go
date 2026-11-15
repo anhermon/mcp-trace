@@ -204,13 +204,11 @@ func (p *StdioProxy) dispatch(data []byte) {
 		return
 	}
 	id := IDString(msg.ID)
-	if id == "null" {
-		id = ""
-	}
+	hasID := len(msg.ID) > 0 && string(msg.ID) != "null"
 	rt := &p.router
 
 	switch {
-	case msg.Method == "" && id != "": // response to a client request
+	case msg.Method == "" && hasID: // response to a client request
 		rt.mu.Lock()
 		st := rt.pending[id]
 		delete(rt.pending, id)
@@ -221,7 +219,7 @@ func (p *StdioProxy) dispatch(data []byte) {
 		}
 		deliver(st, stdioMsg{data: data, final: true})
 
-	case msg.Method != "" && id != "": // server-to-client request
+	case msg.Method != "" && hasID: // server-to-client request
 		p.mu.Lock()
 		name, ver := p.clientName, p.clientVer
 		p.mu.Unlock()
