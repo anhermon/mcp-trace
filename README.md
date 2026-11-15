@@ -171,8 +171,9 @@ Two more limits of sharing one subprocess:
   recent `initialize`, so with several clients a span can carry another
   client's name.
 - One reader serves every client. If a client stops reading its event
-  stream, or half-closes its connection and goes quiet, its buffers fill and
-  every client's traffic from the subprocess waits. Each event write has a
+  stream, half-closes its connection and goes quiet, or reads so slowly that
+  one event takes more than 10 seconds to send, its buffers fill and every
+  client's traffic from the subprocess waits. Each event write has a
   10-second deadline: when it passes, mcp-trace drops that client's stream
   (its in-flight request span ends as abandoned) and traffic resumes. Expect
   a pause of up to about 10 seconds, not an indefinite stall.

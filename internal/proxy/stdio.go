@@ -300,6 +300,13 @@ func (p *StdioProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	hasID := len(rpcReq.ID) > 0
 	switch {
 	case string(rpcReq.ID) == "null":
+		if rpcReq.Method == "" && isErrorResponse(body) {
+			// JSON-RPC's shape for an error whose request id is unknown
+			// (e.g. a parse error): nothing to correlate, accept and drop.
+			p.logger.Debug("dropping client error response with a null id")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		// Neither a request nor a response the bridge can correlate.
 		writeBadRequest(w, nil, -32600, "invalid request: id must not be null")
 		return
