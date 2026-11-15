@@ -138,7 +138,9 @@ for line in sys.stdin:
 	requireAttr(t, s, "mcp.tool.name", "test_tool")
 }
 
-func TestStdio_OnlyPostAllowed(t *testing.T) {
+// A GET that does not accept text/event-stream cannot be the standalone
+// stream, so it gets 405 (MCP Streamable HTTP transport).
+func TestStdio_GetWithoutEventStreamAcceptIs405(t *testing.T) {
 	script := `while read line; do echo "$line"; done`
 	h := newStdioTestHarness(t, "sh", []string{"-c", script}, &Filter{})
 

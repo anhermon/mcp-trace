@@ -128,6 +128,36 @@ Point an HTTP / Streamable HTTP client at `http://localhost:8001` (or `--port`).
 Each request is forwarded to the subprocess, and the response is an OTel span
 plus a normal HTTP body.
 
+The HTTP side is a full Streamable HTTP endpoint:
+
+- A client that accepts `text/event-stream` gets each response as an event
+  stream. The stream also carries what the subprocess sends while that
+  request is open: log and progress notifications, plus requests to the
+  client (`sampling/createMessage`, `elicitation/create`, `roots/list`). The
+  client POSTs its answer, and mcp-trace writes it to the subprocess's stdin.
+  A JSON-only client still gets plain `application/json`.
+- `GET` with `Accept: text/event-stream` opens the standalone stream for
+  messages that arrive when no request stream is open.
+- `initialize` gets an `Mcp-Session-Id`. Requests without one are still
+  served, since every client shares the one subprocess.
+- Request ids are rewritten on the way to the subprocess and restored on the
+  way back, so concurrent clients that reuse ids (every SDK starts at 0 or 1)
+  never get each other's responses.
+
+A stdio subprocess doesn't say which request a notification or server
+request belongs to, so mcp-trace routes it as follows:
+
+- Progress goes to the request that set the matching `progressToken`.
+- Anything else goes to the most recently opened request stream, or else
+  the newest `GET` stream.
+- If no stream is open, the subprocess gets a JSON-RPC error instead of
+  waiting forever.
+
+Relayed server requests get their own span (`mcp.direction=server_to_client`,
+a child of the request in flight). The 30-second response timeout is paused
+while the subprocess waits on the client, for example while a person answers
+an elicitation.
+
 **Another example** with a Python MCP server:
 
 ```bash
