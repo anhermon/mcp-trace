@@ -172,8 +172,41 @@ All flags can be set via a `.mcp-trace.yaml` file (see `.mcp-trace.yaml.example`
 | `--trace-all` | `false` | Trace all JSON-RPC methods (not just `tools/call`) |
 | `--include-lifecycle` | `false` | Include `initialize`/`ping`/`notifications/*` |
 | `--capture-tool-args` | `false` | Record full tool arguments on spans (may contain secrets) |
+| `--allowed-hosts` | *(localhost only)* | Extra hostnames accepted in the `Host`/`Origin` headers, comma-separated; `*` disables the check. See [DNS-rebinding protection](#dns-rebinding-protection) |
 | `--log-level` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `--config` | | Path to config file |
+
+### DNS-rebinding protection
+
+mcp-trace only serves requests whose `Host` header, and `Origin` header when
+there is one, is `localhost`, a `*.localhost` name, or a loopback address
+(`127.0.0.0/8`, `::1`). Anything else gets HTTP 403 with a JSON-RPC error and
+never reaches the upstream server. This stops a web page from using DNS
+rebinding to drive your local MCP server through the proxy, as the
+[MCP transport spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#security-warning)
+asks of local HTTP servers. mcp-trace has to do this itself: it rewrites `Host`
+to `--target` when forwarding, so the upstream's own check never sees the
+original value.
+
+If clients reach the proxy under another name (a Docker Compose service name,
+a LAN hostname or IP), allow it explicitly:
+
+```bash
+mcp-trace --transport streamable --target http://localhost:8000/mcp --allowed-hosts mcp-trace,10.0.0.5
+```
+
+Ports are ignored. `--allowed-hosts '*'` turns the check off and logs a warning.
+
+### Server-to-client requests (sampling, elicitation)
+
+In Streamable HTTP mode, requests the server sends to the client
+(`sampling/createMessage`, `elicitation/create`, `roots/list`) are relayed as
+soon as they arrive, on the POST response stream or the `GET` stream, and the
+client's answer is relayed back upstream. Each round-trip becomes its own span
+(`mcp sampling/createMessage`, attribute `mcp.direction=server_to_client`),
+a child of the `tools/call` span it happened in, so a slow model or a human
+answering an elicitation shows up as such. Server-initiated `ping` follows
+`--include-lifecycle`.
 
 ## Testing without a collector
 
@@ -238,6 +271,7 @@ Every CLI flag can also be set via an environment variable using the `MCP_TRACE_
 | `MCP_TRACE_OTEL_SERVICE_NAME` | `--service-name` | `my-mcp-server` |
 | `MCP_TRACE_TRACE_ALL` | `--trace-all` | `true` |
 | `MCP_TRACE_INCLUDE_LIFECYCLE` | `--include-lifecycle` | `true` |
+| `MCP_TRACE_ALLOWED_HOSTS` | `--allowed-hosts` | `mcp-trace,10.0.0.5` |
 | `MCP_TRACE_CAPTURE_TOOL_ARGS` | `--capture-tool-args` | `true` |
 | `MCP_TRACE_LOG_LEVEL` | `--log-level` | `debug` |
 
@@ -270,6 +304,7 @@ Every traced call produces a span with these attributes:
 | `mcp.session.id` | when the server advertises one | MCP session — groups one client's calls |
 | `mcp.client.name` | when the client sent `initialize` | Client name from `clientInfo` |
 | `mcp.client.version` | when the client sent `initialize` | Client version from `clientInfo` |
+| `mcp.direction` | server-to-client requests only | `server_to_client` (sampling, elicitation, roots/list relayed to the client) |
 | `mcp.tool.name` | tools/call only | Tool name |
 | `mcp.tool.argument_keys` | tools/call with arguments | Argument names, comma-separated |
 | `mcp.tool.arguments` | tools/call, with `--capture-tool-args` | Full arguments as JSON (truncated at 2 KiB) |

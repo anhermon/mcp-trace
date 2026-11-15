@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,25 +31,103 @@ type StreamableProxy struct {
 	CaptureArgs bool
 	clientName  string
 	clientVer   string
+
+	// serverReqs holds server-to-client requests (sampling/createMessage,
+	// elicitation/create, roots/list, ...) relayed on an event stream and
+	// still waiting for the client's answer, keyed by (session, request id).
+	serverReqs *RequestMap
 }
 
 // NewStreamableProxy creates a proxy for Streamable HTTP transport.
 func NewStreamableProxy(ctx context.Context, targetURL string, filter *Filter, tracer trace.Tracer, logger *slog.Logger) (*StreamableProxy, error) {
 	return &StreamableProxy{
-		target: targetURL,
-		filter: filter,
-		tracer: tracer,
-		reqMap: NewRequestMap(),
-		logger: logger,
+		target:     targetURL,
+		filter:     filter,
+		tracer:     tracer,
+		reqMap:     NewRequestMap(),
+		serverReqs: NewRequestMap(),
+		logger:     logger,
 	}, nil
 }
 
+// mcpSessionHeader is the Streamable HTTP session header. Header lookups are
+// case-insensitive, so this also matches mcp-session-id.
+const mcpSessionHeader = "Mcp-Session-Id"
+
 func (p *StreamableProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "only POST is supported for streamable transport", http.StatusMethodNotAllowed)
+	switch r.Method {
+	case http.MethodPost:
+		p.handlePost(w, r)
+	case http.MethodGet, http.MethodDelete:
+		// GET opens the standalone server-to-client event stream; DELETE ends
+		// the session. Both are forwarded unchanged: the upstream decides
+		// whether it supports them (405 is a valid answer to either).
+		p.handleOther(w, r)
+	default:
+		http.Error(w, "method not allowed for streamable transport", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleOther forwards a GET or DELETE. A GET stream can carry server-to-client
+// requests, so its events are relayed as they arrive and those requests traced.
+func (p *StreamableProxy) handleOther(w http.ResponseWriter, r *http.Request) {
+	method := http.MethodGet
+	if r.Method == http.MethodDelete {
+		method = http.MethodDelete
+	}
+	upReq, err := http.NewRequestWithContext(r.Context(), method, p.target, nil)
+	if err != nil {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
+	copyHeaders(upReq.Header, r.Header)
+	spanCtx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 
+	resp, err := http.DefaultClient.Do(upReq)
+	if err != nil {
+		p.logger.Error("upstream request failed", "method", method, "err", err)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	forwardResponseHeaders(w, resp)
+	fw := newFlushWriter(w)
+	if resp.StatusCode < 400 && isEventStream(resp.Header.Get("Content-Type")) {
+		p.relayEventStream(fw, resp.Body, spanCtx, sessionOf(r, resp), nil)
+		return
+	}
+	_, _ = io.Copy(fw, resp.Body)
+}
+
+// sessionOf returns the MCP session id for an exchange: the client's header,
+// or the one the upstream just assigned (initialize).
+func sessionOf(r *http.Request, resp *http.Response) string {
+	if sid := r.Header.Get(mcpSessionHeader); sid != "" {
+		return sid
+	}
+	if resp != nil {
+		return resp.Header.Get(mcpSessionHeader)
+	}
+	return ""
+}
+
+func forwardResponseHeaders(w http.ResponseWriter, resp *http.Response) {
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	// Send the headers now: an event stream (notably the GET stream) can stay
+	// silent for a long time, and the client waits for headers before it
+	// treats the stream as open.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (p *StreamableProxy) handlePost(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "reading body failed", http.StatusBadRequest)
@@ -68,6 +147,12 @@ func (p *StreamableProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"bytes", len(body), "err", err)
 	}
 
+	if err == nil && rpcReq.Method == "" && len(rpcReq.ID) > 0 {
+		// The client answering a server-to-client request (sampling,
+		// elicitation) relayed earlier on an event stream.
+		p.finishServerRequest(r.Header.Get(mcpSessionHeader), body)
+	}
+
 	if err == nil {
 		// Remember client info from initialize
 		if rpcReq.Method == "initialize" {
@@ -76,7 +161,7 @@ func (p *StreamableProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err == nil && p.filter.ShouldTrace(rpcReq.Method) {
+	if err == nil && rpcReq.Method != "" && p.filter.ShouldTrace(rpcReq.Method) {
 		id := IDString(rpcReq.ID)
 		if id != "" {
 			attrs := telemetry.SpanAttrs{
@@ -139,55 +224,60 @@ func (p *StreamableProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Forward response headers
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
+	forwardResponseHeaders(w, resp)
 
-	// Stream the response and parse JSON-RPC responses.
+	// Every write is flushed: a text/event-stream answer can carry a server
+	// request (sampling/createMessage, elicitation/create) that the server
+	// blocks on until the client answers on a separate POST. Buffering that
+	// event deadlocks the call until the client's request timeout.
+	fw := newFlushWriter(w)
+	contentType := resp.Header.Get("Content-Type")
+
 	// application/json is one document. The Python SDK's default Streamable
-	// HTTP mode (json_response=False) answers the same POST with
-	// text/event-stream instead, and that body is not a JSON document.
-	if spanStarted && resp.StatusCode < 400 {
-		p.streamAndParseResponse(w, resp.Body, resp.Header.Get("Content-Type"), inflight)
-	} else {
-		// Just forward without parsing
-		_, _ = io.Copy(w, resp.Body)
+	// HTTP mode (json_response=False), and the TypeScript SDK, answer the same
+	// POST with text/event-stream instead, which is relayed event by event.
+	switch {
+	case resp.StatusCode < 400 && isEventStream(contentType):
+		if !spanStarted {
+			inflight = nil
+		}
+		p.relayEventStream(fw, resp.Body, spanCtx, sessionOf(r, resp), inflight)
+	case spanStarted && resp.StatusCode < 400:
+		p.copyAndParseJSON(fw, resp.Body, inflight)
+	default:
+		_, _ = io.Copy(fw, resp.Body)
 	}
 }
 
-// streamAndParseResponse streams the response body to the client while parsing
-// JSON-RPC responses to close spans.
-func (p *StreamableProxy) streamAndParseResponse(w http.ResponseWriter, r io.Reader, contentType string, inflight *InFlightRequest) {
+// flushWriter flushes after every write so streamed events reach the client
+// as soon as the upstream sends them.
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func newFlushWriter(w http.ResponseWriter) *flushWriter {
+	f, _ := w.(http.Flusher)
+	return &flushWriter{w: w, f: f}
+}
+
+func (fw *flushWriter) Write(b []byte) (int, error) {
+	n, err := fw.w.Write(b)
+	if fw.f != nil {
+		fw.f.Flush()
+	}
+	return n, err
+}
+
+// copyAndParseJSON forwards a single application/json response unchanged and
+// closes inflight from it.
+func (p *StreamableProxy) copyAndParseJSON(w io.Writer, r io.Reader, inflight *InFlightRequest) {
 	var buf bytes.Buffer
-	tee := io.TeeReader(r, &buf)
-
-	// Stream to client. Bytes are copied unchanged; parsing uses the copy.
-	written, _ := io.Copy(w, tee)
-
+	written, _ := io.Copy(w, io.TeeReader(r, &buf))
 	if written == 0 {
 		return
 	}
-
 	data := buf.Bytes()
-	if isEventStream(contentType) {
-		// Default Streamable HTTP (Python SDK json_response=False, and the
-		// same shape from sse-starlette): the POST body is an SSE stream.
-		// Each JSON-RPC message is one event, typically
-		//
-		//	event: message
-		//	data: {"jsonrpc":"2.0","id":1,"result":...}
-		//
-		// A priming event (empty data) and notifications can precede the
-		// response. Parsing the whole body as one JSON document fails, and
-		// returning here used to leave the span open so it was never exported.
-		p.endSpanFromEventStream(data, inflight)
-		return
-	}
-
 	resp, err := ParseResponse(data)
 	if err != nil {
 		p.logger.Debug("could not parse response as JSON-RPC", "err", err)
@@ -206,25 +296,50 @@ func isEventStream(contentType string) bool {
 	return strings.EqualFold(media, "text/event-stream")
 }
 
-// endSpanFromEventStream closes inflight from the first SSE event whose data
-// is the JSON-RPC response for that request. Other events (priming, progress
-// notifications, server requests with a different id) are ignored. If the
-// stream ends with no matching response, the span is still ended so it is
-// exported instead of leaking.
-func (p *StreamableProxy) endSpanFromEventStream(data []byte, inflight *InFlightRequest) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELine)
+// relayEventStream copies an upstream text/event-stream to w unchanged, one
+// line at a time, and inspects each complete event as it passes:
+//
+//   - the JSON-RPC response for inflight (if any) ends that span;
+//   - a server-to-client request (it has both "method" and "id") starts a span
+//     that stays open until the client's answer arrives on a POST.
+//
+// A priming event (empty data), notifications and responses for other ids are
+// only forwarded. If the stream ends with no matching response, inflight is
+// still ended so it is exported instead of leaking, and any server request
+// first seen on this stream and never answered is ended as abandoned.
+func (p *StreamableProxy) relayEventStream(w io.Writer, body io.Reader, parent context.Context, sessionID string, inflight *InFlightRequest) {
+	br := bufio.NewReaderSize(body, 64*1024)
 
-	var dataLines []string
-	ended := false
+	var (
+		dataLines []string
+		dataBytes int
+		ended     bool
+		opened    []string // ids of server requests first seen on this stream
+	)
 	finishEvent := func() {
 		payload := strings.Join(dataLines, "\n")
-		dataLines = nil
-		if ended || strings.TrimSpace(payload) == "" {
+		dataLines, dataBytes = nil, 0
+		if strings.TrimSpace(payload) == "" {
+			return
+		}
+		var msg struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal([]byte(payload), &msg) != nil || len(msg.ID) == 0 || IDString(msg.ID) == "" {
+			return // notification, batch, or not JSON-RPC
+		}
+		if msg.Method != "" {
+			if id := p.startServerRequest(parent, sessionID, msg.Method, IDString(msg.ID)); id != "" {
+				opened = append(opened, id)
+			}
+			return
+		}
+		if inflight == nil || ended {
 			return
 		}
 		resp, err := ParseResponse([]byte(payload))
-		if err != nil || resp.ID == nil {
+		if err != nil {
 			return
 		}
 		if p.finishIfMatch(inflight, resp, len(payload)) {
@@ -232,32 +347,119 @@ func (p *StreamableProxy) endSpanFromEventStream(data []byte, inflight *InFlight
 		}
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			finishEvent()
-			continue
+	for {
+		// Each line is forwarded as soon as it is complete. ReadBytes keeps
+		// the original line ending, so the client gets the bytes unchanged.
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, werr := w.Write(line); werr != nil {
+				p.logger.Debug("client went away during event stream", "err", werr)
+				break
+			}
+			if len(line) > maxSSELine {
+				dataLines, dataBytes = nil, maxSSELine+1 // forwarded, too large to parse
+			} else {
+				dataBytes = p.parseSSELine(strings.TrimRight(string(line), "\r\n"), &dataLines, dataBytes, finishEvent)
+			}
 		}
-		if strings.HasPrefix(line, ":") || strings.HasPrefix(line, "id:") || strings.HasPrefix(line, "retry:") {
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, sseFieldValue(line, "data:"))
+		if err != nil {
+			if err != io.EOF {
+				p.logger.Debug("reading streamable event stream", "err", err)
+			}
+			break
 		}
 	}
 	if len(dataLines) > 0 {
 		finishEvent()
 	}
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		p.logger.Debug("reading streamable event stream", "err", err)
-	}
-	if !ended {
+	if inflight != nil && !ended {
 		p.endInFlight(inflight, telemetry.StatusAbandoned,
 			"streamable HTTP event stream closed before a JSON-RPC response arrived")
 	}
+	for _, id := range opened {
+		if e := p.serverReqs.Take(sessionID, id); e != nil {
+			p.endInFlight(e, telemetry.StatusAbandoned,
+				"event stream closed before the client answered the server request")
+		}
+	}
+}
+
+// parseSSELine applies one SSE line (without its line ending) to the event
+// being assembled and returns the new byte count of its data. A blank line
+// dispatches the event. Events whose data grows past maxSSELine are dropped
+// from parsing (they are still forwarded).
+func (p *StreamableProxy) parseSSELine(line string, dataLines *[]string, dataBytes int, dispatch func()) int {
+	switch {
+	case line == "":
+		dispatch()
+		return 0
+	case strings.HasPrefix(line, "data:"):
+		v := sseFieldValue(line, "data:")
+		if dataBytes+len(v) > maxSSELine {
+			*dataLines = nil
+			return maxSSELine + 1
+		}
+		*dataLines = append(*dataLines, v)
+		return dataBytes + len(v)
+	default:
+		// comments (":"), event:, id:, retry: carry no JSON-RPC payload.
+		return dataBytes
+	}
+}
+
+// startServerRequest opens a span for a server-to-client request seen on an
+// event stream and remembers it until the client answers. It returns the
+// request id when a span was started.
+func (p *StreamableProxy) startServerRequest(parent context.Context, sessionID, method, id string) string {
+	if !p.filter.ShouldTraceServerRequest(method) {
+		return ""
+	}
+	_, span := telemetry.StartSpan(parent, p.tracer, telemetry.SpanAttrs{
+		Method:     method,
+		RequestID:  id,
+		SessionID:  sessionID,
+		Target:     p.target,
+		Direction:  telemetry.DirectionServerToClient,
+		ClientName: p.clientName,
+		ClientVer:  p.clientVer,
+	})
+	p.serverReqs.Store(sessionID, id, &InFlightRequest{
+		Span:      span,
+		Method:    method,
+		RequestID: id,
+		SessionID: sessionID,
+		StartTime: time.Now(),
+	})
+	p.logger.Debug("server request relayed to client", "id", id, "method", method, "session", sessionID)
+	return id
+}
+
+// finishServerRequest ends the span of the server-to-client request that the
+// client is answering with body. Unknown ids are ignored.
+func (p *StreamableProxy) finishServerRequest(sessionID string, body []byte) {
+	resp, err := ParseResponse(body)
+	if err != nil || resp.ID == nil {
+		return
+	}
+	id := IDString(resp.ID)
+	e := p.serverReqs.Take(sessionID, id)
+	if e == nil {
+		return
+	}
+	isErr, errMsg, errCode := IsError(resp)
+	status := telemetry.StatusOK
+	if isErr {
+		status = telemetry.StatusError
+	}
+	durationMS := float64(time.Since(e.StartTime).Microseconds()) / 1000.0
+	telemetry.EndSpan(e.Span, telemetry.EndAttrs{
+		DurationMS:   durationMS,
+		Status:       status,
+		ErrMsg:       errMsg,
+		ErrCode:      errCode,
+		ResponseSize: len(body),
+	})
+	p.logger.Debug("client answered server request", "id", id, "method", e.Method, "duration_ms", durationMS, "error", isErr)
 }
 
 // sseFieldValue returns an SSE field value, dropping the single optional space

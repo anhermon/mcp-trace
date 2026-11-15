@@ -30,7 +30,14 @@ type SpanAttrs struct {
 	ArgsJSON   string // full tool arguments; only set when capture is enabled
 	ClientName string
 	ClientVer  string
+	// Direction is set for messages that do not flow client to server, e.g.
+	// DirectionServerToClient for sampling/createMessage relayed to the client.
+	Direction string
 }
+
+// DirectionServerToClient marks a span for a request the MCP server sent to
+// the client (sampling, elicitation, roots/list) that the proxy relayed.
+const DirectionServerToClient = "server_to_client"
 
 // EndAttrs holds what is only known once the response comes back.
 type EndAttrs struct {
@@ -63,6 +70,7 @@ func StartSpan(ctx context.Context, tracer trace.Tracer, attrs SpanAttrs) (conte
 		{"mcp.tool.arguments", attrs.ArgsJSON},
 		{"mcp.client.name", attrs.ClientName},
 		{"mcp.client.version", attrs.ClientVer},
+		{"mcp.direction", attrs.Direction},
 	}
 	for _, o := range optional {
 		if o.val != "" {

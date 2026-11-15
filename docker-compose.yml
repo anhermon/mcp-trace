@@ -25,6 +25,9 @@ services:
       - "--port=8001"
       - "--otel-endpoint=otel-collector:4317"
       - "--log-level=debug"
+      # demo-client reaches the proxy as http://mcp-trace:8001; any Host
+      # other than localhost is rejected unless allowlisted (DNS rebinding).
+      - "--allowed-hosts=mcp-trace"
     ports:
       - "8001:8001"
     depends_on: [demo-server, otel-collector]

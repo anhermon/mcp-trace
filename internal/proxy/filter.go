@@ -32,3 +32,15 @@ func isLifecycle(method string) bool {
 	}
 	return strings.HasPrefix(method, "notifications/")
 }
+
+// ShouldTraceServerRequest reports whether a request the server sends to the
+// client (sampling/createMessage, elicitation/create, roots/list, ...) should
+// produce a span. These round-trips happen inside a traced call and often
+// dominate its duration (a human answering an elicitation, a model sampling),
+// so they are traced by default. Server pings follow IncludeLifecycle.
+func (f *Filter) ShouldTraceServerRequest(method string) bool {
+	if isLifecycle(method) {
+		return f.IncludeLifecycle
+	}
+	return true
+}

@@ -97,3 +97,39 @@ otel:
 		t.Errorf("expected OTel.ServiceName=my-service, got %s", cfg.OTel.ServiceName)
 	}
 }
+
+func TestLoad_AllowedHosts(t *testing.T) {
+	cmd := &cobra.Command{}
+	v := viper.New()
+	BindFlags(cmd, v)
+	if err := cmd.Flags().Parse([]string{"--target", "http://x", "--allowed-hosts", "mcp-trace,10.0.0.5"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(v, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.AllowedHosts) != 2 || cfg.AllowedHosts[0] != "mcp-trace" || cfg.AllowedHosts[1] != "10.0.0.5" {
+		t.Errorf("AllowedHosts = %q, want [mcp-trace 10.0.0.5]", cfg.AllowedHosts)
+	}
+}
+
+func TestLoad_AllowedHostsEnv(t *testing.T) {
+	t.Setenv("MCP_TRACE_TARGET", "http://x")
+	t.Setenv("MCP_TRACE_ALLOWED_HOSTS", "a.example,b.example")
+	v := viper.New()
+	BindFlags(&cobra.Command{}, v)
+	cfg, err := Load(v, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.AllowedHosts) != 2 || cfg.AllowedHosts[1] != "b.example" {
+		t.Errorf("AllowedHosts = %q, want [a.example b.example]", cfg.AllowedHosts)
+	}
+}
+
+func TestDefaults_NoExtraAllowedHosts(t *testing.T) {
+	if len(Defaults().AllowedHosts) != 0 {
+		t.Error("default allowlist must be empty: only localhost is served")
+	}
+}
